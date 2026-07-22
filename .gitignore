@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+rl-portfolio-allocator/checkpoints/*
+!rl-portfolio-allocator/checkpoints/.gitkeep
+rl-portfolio-allocator-production/data/*.parquet
+rl-portfolio-allocator-production/data/*.csv
+.env

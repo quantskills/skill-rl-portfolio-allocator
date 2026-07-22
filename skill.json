@@ -1,0 +1,14 @@
+{
+  "name": "skill-rl-portfolio-allocator",
+  "description": "PPO-based dynamic factor-weight allocator on CSI300 with embedded costs, DSR reward, and long-short portfolio construction.",
+  "license": "GPL-3.0-only",
+  "tags": ["quant", "rl", "portfolio", "ppo", "ashare"],
+  "metadata": {
+    "organization": "QuantSkills",
+    "organization_url": "https://github.com/quantskills",
+    "repository": "skill-rl-portfolio-allocator",
+    "repository_url": "https://github.com/quantskills/skill-rl-portfolio-allocator",
+    "project_type": "skill",
+    "collection": "rl-alpha"
+  }
+}
