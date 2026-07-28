@@ -9,7 +9,7 @@ echo "== [1/6] features =="
 python scripts/features.py
 
 echo "== [2/6] train smoke =="
-python scripts/train.py
+python scripts/train.py --timesteps "${PIPELINE_TRAIN_TIMESTEPS:-5000}"
 
 echo "== [3/6] backtest (research + tradeable) =="
 python scripts/backtest.py --timesteps "${PIPELINE_TIMESTEPS:-200000}"
