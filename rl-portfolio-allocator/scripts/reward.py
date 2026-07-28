@@ -38,16 +38,29 @@ def hhi(weights: np.ndarray) -> float:
 
 
 def compose_reward(
-    dsr_delta: float, drawdown: float, turnover: float, hhi_val: float, cfg: dict
+    dsr_delta: float, drawdown: float, turnover: float, hhi_val: float, cfg: dict,
+    net_ret: float,
+    long_notional: float = 0.0, short_notional: float = 0.0, long_cap: float = 1.0, short_cap: float = 0.3
 ) -> tuple[float, dict]:
+    ret_term = cfg["reward_ret_weight"] * net_ret
     dd_pen = -cfg["lambda_drawdown"] * max(0.0, drawdown)
     to_pen = -cfg["lambda_turnover"] * turnover
     conc_pen = -cfg["lambda_concentration"] * hhi_val
-    total = dsr_delta + dd_pen + to_pen + conc_pen
+
+    # Hard constraint penalty: if notional exceeds cap, apply large penalty
+    constraint_pen = 0.0
+    if long_notional > long_cap * 1.01:
+        constraint_pen -= 1.0 * (long_notional - long_cap)  # 1.0 = very high cost per unit excess
+    if short_notional > short_cap * 1.01:
+        constraint_pen -= 1.0 * (short_notional - short_cap)
+
+    total = ret_term + dsr_delta + dd_pen + to_pen + conc_pen + constraint_pen
     return total, {
+        "ret_term": ret_term,
         "dsr": dsr_delta,
         "drawdown_penalty": dd_pen,
         "turnover_penalty": to_pen,
         "concentration_penalty": conc_pen,
+        "constraint_penalty": constraint_pen,
         "total": total,
     }
