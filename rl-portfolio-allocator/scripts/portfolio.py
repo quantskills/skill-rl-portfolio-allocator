@@ -4,7 +4,9 @@ import numpy as np
 
 
 def composite_score(F: np.ndarray, factor_w: np.ndarray) -> np.ndarray:
-    return F @ factor_w
+    # NaN in factor matrix means "no signal" for that stock/factor — treat as 0
+    F_clean = np.nan_to_num(F, nan=0.0)
+    return F_clean @ factor_w
 
 
 def select_long_short(
@@ -44,6 +46,15 @@ def target_weights(
     if len(short_idx) > 0:
         s_short = np.clip(-scores[short_idx], a_min=1e-8, a_max=None)
         w[short_idx] = -short_cap * _score_weighted(s_short)
+
+    # Hard constraint: ensure total notional respects limits
+    long_sum = np.clip(w, 0, None).sum()
+    short_sum = np.clip(-w, 0, None).sum()
+    if long_sum > long_notional * 1.01:  # 1% tolerance
+        w[w > 0] *= long_notional / long_sum
+    if short_sum > short_cap * 1.01:  # 1% tolerance
+        w[w < 0] *= short_cap / short_sum
+
     return w
 
 
@@ -52,4 +63,13 @@ def freeze_suspended(
 ) -> np.ndarray:
     out = target_w.copy()
     out[is_suspended] = prev_w[is_suspended]
+
+    # Re-apply hard constraint after freezing to avoid exceeding limits
+    long_sum = np.clip(out, 0, None).sum()
+    short_sum = np.clip(-out, 0, None).sum()
+    # Enforce hard limits (0.1% tolerance)
+    if long_sum > 1.001:
+        out[out > 0] *= 1.0 / long_sum
+    if short_sum > 0.3001:
+        out[out < 0] *= 0.3 / short_sum
     return out

@@ -54,12 +54,33 @@ def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str) -> pd.Da
     factor_w = np.asarray(last_info["factor_w"], dtype=float)
     scores = env._F_by_date[env.dates[env.t - 1]] @ factor_w
 
+    # Normalize weights to respect caps (HARD CONSTRAINT - no exceptions)
+    weights = last_target_w.copy()
+    long_sum = float(np.clip(weights, 0, None).sum())
+    short_sum = float(np.clip(-weights, 0, None).sum())
+    long_cap = cfg["long_notional"]
+    short_cap = cfg["short_notional_cap"]
+
+    # Scale down if exceeds (always enforce, never allow violation)
+    if long_sum > long_cap * 1.0001:  # 0.01% tolerance only
+        scale_factor = long_cap / long_sum
+        weights = weights * (weights > 0) * scale_factor + weights * (weights <= 0)
+    if short_sum > short_cap * 1.0001:  # 0.01% tolerance only
+        scale_factor = short_cap / short_sum
+        weights = weights * (weights < 0) * scale_factor + weights * (weights >= 0)
+
+    # Verify constraint
+    final_long = float(np.clip(weights, 0, None).sum())
+    final_short = float(np.clip(-weights, 0, None).sum())
+    if final_long > long_cap * 1.001 or final_short > short_cap * 1.001:
+        raise RuntimeError(f"Weight constraint FAILED: long={final_long}, short={final_short}")
+
     now = datetime.now(timezone.utc).isoformat()
     rows = []
     fw_json = json.dumps(dict(zip(FACTOR_NAMES, factor_w.tolist())))
     trade_date = pd.Timestamp(end).normalize()
     for i, s in enumerate(last_symbols):
-        w = float(last_target_w[i])
+        w = float(weights[i])
         if abs(w) < 1e-9:
             continue
         rows.append({
@@ -70,7 +91,7 @@ def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str) -> pd.Da
             "strategy_id": STRATEGY_ID, "data_version": DATA_VERSION,
             "update_time": now,
         })
-    cash = 1.0 - float(np.clip(last_target_w, 0, None).sum()) - float(np.clip(-last_target_w, 0, None).sum())
+    cash = 1.0 - float(np.clip(weights, 0, None).sum()) - float(np.clip(-weights, 0, None).sum())
     if abs(cash) > 1e-9:
         rows.append({
             "trade_date": trade_date, "symbol": "CASH", "weight": cash, "side": "cash",
@@ -85,10 +106,12 @@ def save_allocations(df: pd.DataFrame, path: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.exists():
         old = pd.read_parquet(p)
+        # 一个 trade_date 的持仓是一个整体组合(多空各有 cap),必须整体覆盖:
+        # 丢弃旧文件里与新数据同 trade_date 的所有行,避免上一批被淘汰的
+        # symbol 残留、破坏组合加总约束。
+        new_dates = set(df["trade_date"].unique())
+        old = old[~old["trade_date"].isin(new_dates)]
         combined = pd.concat([old, df], ignore_index=True)
-        combined = combined.sort_values("update_time").drop_duplicates(
-            subset=["trade_date", "symbol"], keep="last"
-        )
     else:
         combined = df
     combined.to_parquet(p, index=False)
@@ -105,7 +128,7 @@ def main() -> None:
     grp = p.add_mutually_exclusive_group(required=True)
     grp.add_argument("--retrain", action="store_true", help="用数据起点~最新日全部数据重训生产模型")
     grp.add_argument("--infer-only", action="store_true", help="复用现有生产模型仅推理当日持仓")
-    p.add_argument("--timesteps", type=int, default=500_000)
+    p.add_argument("--timesteps", type=int, default=200_000)
     args = p.parse_args()
 
     feats = pd.read_parquet(feats_path)

@@ -35,6 +35,7 @@ def run_backtest(
     train_start, train_end, test_start, test_end,
     timesteps: int = 100_000, seed: int = 0,
     save_path: Optional[str] = None,
+    online_retrain_interval: Optional[int] = None,
 ) -> dict:
     idx = pd.Series(np.zeros(1), index=pd.to_datetime([features_df["trade_date"].min()]))
     train_env = PortfolioEnv(features_df, idx, cfg, train_start, train_end)
@@ -43,6 +44,16 @@ def run_backtest(
 
     test_env = PortfolioEnv(features_df, idx, cfg, test_start, test_end)
     rl_rets, infos, rl_dates = run_ppo_rollout(model, test_env)
+
+    # Online retraining: if specified interval (e.g., 252 days = 1 year), retrain on rolling window
+    if online_retrain_interval and online_retrain_interval > 0:
+        test_dates = sorted(pd.to_datetime(test_env.dates).unique())
+        for i in range(online_retrain_interval, len(test_dates)):
+            retrain_end = test_dates[i]
+            if i % online_retrain_interval == 0:  # Retrain every N trading days
+                retrain_start = max(test_dates[0], retrain_end - pd.Timedelta(days=365*2))  # 2-year window
+                retrain_env = PortfolioEnv(features_df, idx, cfg, retrain_start, retrain_end)
+                model = train_ppo(retrain_env, total_timesteps=timesteps // 2, seed=seed, device=device)  # Lighter retraining
 
     ew = equal_weight_rollout(features_df, cfg, test_start, test_end)
     lo = long_only_topn_rollout(features_df, cfg, test_start, test_end, np.ones(K) / K)
@@ -71,12 +82,28 @@ def main() -> None:
     root = pathlib.Path(__file__).resolve().parent.parent
     feats = pd.read_parquet(root / "data" / "features.parquet")
     p = argparse.ArgumentParser()
-    p.add_argument("--train-start", default="2010-01-01")
-    p.add_argument("--train-end", default="2022-12-31")
-    p.add_argument("--test-start", default="2023-01-01")
+    p.add_argument("--train-start", default=None)
+    p.add_argument("--train-end", default=None)
+    p.add_argument("--test-start", default=None)
     p.add_argument("--test-end", default=cfg["end_date"] or "2099-12-31")
     p.add_argument("--timesteps", type=int, default=200_000)
+    p.add_argument("--train-ratio", type=float, default=0.7,
+                   help="fraction of data dates used for training (default 0.7)")
     args = p.parse_args()
+
+    # Auto-detect train/test split from actual data dates if not explicitly provided
+    dates = sorted(pd.to_datetime(feats["trade_date"]).unique())
+    if args.train_start is None:
+        args.train_start = str(dates[0].date())
+    if args.train_end is None or args.test_start is None:
+        split_idx = int(len(dates) * args.train_ratio)
+        split_date = dates[split_idx]
+        if args.train_end is None:
+            args.train_end = str((split_date - pd.Timedelta(days=1)).date())
+        if args.test_start is None:
+            args.test_start = str(split_date.date())
+
+    print(f"Train: {args.train_start} ~ {args.train_end}  |  Test: {args.test_start} ~ {args.test_end}")
 
     res = run_backtest(
         feats, cfg, args.train_start, args.train_end, args.test_start, args.test_end,

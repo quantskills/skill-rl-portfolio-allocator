@@ -7,7 +7,12 @@ import pandas as pd
 
 
 def state_dim(k: int) -> int:
-    return 8 + 3 * k
+    # [vol_20, vol_60, market_vol_20, vol_regime_q] (4)
+    # + [avg_corr_20, avg_corr_60] (2)
+    # + exposure (k) + factor_ic (k) + prev_factor_w (k) (3*k)
+    # + [cash, recent_to] (2)
+    # + [volatility_regime, drawdown_flag] (2) ← NEW market regime indicators
+    return 8 + 3 * k + 2
 
 
 def _safe_std(x: np.ndarray) -> float:
@@ -48,7 +53,10 @@ class StateBuilder:
         if F is not None and len(F) >= 5:
             corr = F.corr().values
             iu = np.triu_indices_from(corr, k=1)
-            avg_corr_20 = float(np.nanmean(corr[iu])) if iu[0].size else 0.0
+            if iu[0].size > 0 and np.isfinite(corr[iu]).any():
+                avg_corr_20 = float(np.nanmean(corr[iu]))
+            else:
+                avg_corr_20 = 0.0
         else:
             avg_corr_20 = 0.0
         avg_corr_60 = avg_corr_20
@@ -62,13 +70,17 @@ class StateBuilder:
 
         recent_to = float(np.mean(self.recent_turnover_history[-20:])) if self.recent_turnover_history else 0.0
 
+        # Market regime indicators: detect structural breaks
+        vol_regime = 1.0 if vol_20 > 2 * max(np.percentile(self._vol_history[-252:], 75), 0.01) else 0.0
+        drawdown_flag = 1.0 if (self.portfolio_returns_history and np.sum(np.array(self.portfolio_returns_history[-60:]) < 0) > 30) else 0.0
+
         vec = np.concatenate([
             np.array([vol_20, vol_60, market_vol_20, vol_regime_q], dtype=float),
             np.array([avg_corr_20, avg_corr_60], dtype=float),
             exposure.astype(float),
             factor_ic.astype(float),
             prev_factor_w.astype(float),
-            np.array([cash, recent_to], dtype=float),
+            np.array([cash, recent_to, vol_regime, drawdown_flag], dtype=float),
         ])
         vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
         return vec.astype(np.float32)

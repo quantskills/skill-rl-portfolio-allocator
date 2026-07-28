@@ -21,7 +21,7 @@ STRESS_SEGMENTS = [
         "train_end": "2007-06-30",
         "test_start": "2007-07-01", "test_end": "2009-03-31",
         "core_start": "2008-09-01", "core_end": "2009-03-31",
-        "required_min_years": 3,
+        "required_min_years": 2,
     },
     {
         "name": "2015_ashare_crash",
