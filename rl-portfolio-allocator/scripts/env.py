@@ -123,10 +123,23 @@ class PortfolioEnv(gym.Env):
         turnover = float(np.abs(target_w - self.prev_stock_w).sum())
         long_notional = float(np.clip(target_w, 0, None).sum())
         short_notional = float(np.clip(-target_w, 0, None).sum())
+
+        # Hard clip to enforce constraints (safety guard after all processing)
+        if long_notional > self.cfg["long_notional"] * 1.001:
+            target_w[target_w > 0] *= self.cfg["long_notional"] / long_notional
+            long_notional = self.cfg["long_notional"]
+        if short_notional > self.cfg["short_notional_cap"] * 1.001:
+            target_w[target_w < 0] *= self.cfg["short_notional_cap"] / short_notional
+            short_notional = self.cfg["short_notional_cap"]
         hhi_v = hhi(target_w)
         dsr_delta = self.dsr.update(net, self.cfg["dsr_eta"], sortino=(self.cfg["reward_type"] == "sortino"))
         drawdown = 0.0 if self.dsr.peak <= 0 else (self.dsr.peak - self.dsr.nav) / self.dsr.peak
-        reward, parts = compose_reward(dsr_delta, drawdown, turnover, hhi_v, self.cfg)
+        reward, parts = compose_reward(
+            dsr_delta, drawdown, turnover, hhi_v, self.cfg,
+            net_ret=net,
+            long_notional=long_notional, short_notional=short_notional,
+            long_cap=self.cfg["long_notional"], short_cap=self.cfg["short_notional_cap"]
+        )
 
         self.state_builder.portfolio_returns_history.append(net)
         self.state_builder.recent_turnover_history.append(turnover)
