@@ -68,11 +68,10 @@ def run_backtest(
     diag = summarize_rollout(infos)
     warns = check_degeneracy(diag, cfg)
 
-    research_ok = (m["rl"]["sharpe"] > m["static_factor_equal"]["sharpe"]
-                   and m["rl"]["calmar"] > m["static_factor_equal"]["calmar"])
     return {
         "metrics": m, "diagnostics": diag, "warnings": warns,
-        "research_ok": bool(research_ok),
+        "research_ok": False,
+        "research_status": "single_split_is_diagnostic_only",
         "rl_daily_rets": rl_rets, "rl_dates": rl_dates,
     }
 
