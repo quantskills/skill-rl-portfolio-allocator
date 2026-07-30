@@ -54,8 +54,10 @@ def state_fields(factor_names: list[str] | tuple[str, ...]) -> list[str]:
     return fields
 
 
-def state_dim(k: int) -> int:
-    return len(state_fields([f"factor_{i}" for i in range(k)]))
+def state_dim(factor_names: int | list[str] | tuple[str, ...]) -> int:
+    if isinstance(factor_names, int):
+        factor_names = [f"factor_{i}" for i in range(factor_names)]
+    return len(state_fields(factor_names))
 
 
 def _safe_std(values: np.ndarray) -> float:
@@ -85,20 +87,12 @@ class StateBuilder:
     index_returns: pd.Series | None = None
 
     def __post_init__(self) -> None:
-        if self.market_state is None:
-            self.market_state = self.index_returns
-        self._legacy_market_state = isinstance(self.market_state, pd.Series)
-        if isinstance(self.market_state, pd.Series):
-            # Compatibility for the unchanged legacy environment: it has no
-            # precomputed market-state table, so use finite neutral values.
-            panel_dates = pd.to_datetime(list(self.factor_panel_by_date))
-            dates = panel_dates if len(panel_dates) else pd.to_datetime(self.market_state.index)
-            self.market_state = pd.DataFrame(index=dates)
-            self.market_state = self.market_state.reindex(columns=exogenous_fields([]), fill_value=0.0)
-            self.market_state.loc[:, :] = 0.0
-        else:
-            self.market_state = self.market_state.copy()
-            self.market_state.index = pd.to_datetime(self.market_state.index)
+        if not isinstance(self.market_state, pd.DataFrame):
+            raise TypeError("market_state must be an explicit pandas DataFrame")
+        if self.index_returns is not None:
+            raise TypeError("index_returns is unsupported; pass market_state explicitly")
+        self.market_state = self.market_state.copy()
+        self.market_state.index = pd.to_datetime(self.market_state.index)
         self._field_index: dict[str, int] = {}
 
     def field_index(self, field_name: str, factor_names: list[str] | tuple[str, ...] | None = None) -> int:
@@ -125,10 +119,7 @@ class StateBuilder:
             row = self.market_state.loc[pd.Timestamp(date)]
         except KeyError as exc:
             raise KeyError(f"missing market state for {date}") from exc
-        if self._legacy_market_state:
-            exogenous = np.zeros(len(exogenous_fields(names)), dtype=float)
-        else:
-            exogenous = pd.to_numeric(row.reindex(exogenous_fields(names)), errors="coerce").to_numpy(dtype=float)
+        exogenous = pd.to_numeric(row.reindex(exogenous_fields(names)), errors="coerce").to_numpy(dtype=float)
         if not np.isfinite(exogenous).all():
             raise ValueError(f"non-finite exogenous market state for {date}")
 

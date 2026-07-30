@@ -8,6 +8,7 @@ from scripts.state import (
     BASE_MARKET_FIELDS,
     StateBuilder,
     exogenous_fields,
+    state_dim,
     state_fields,
 )
 
@@ -22,6 +23,15 @@ def test_state_fields_are_versioned_and_unique_without_factor_ic_0():
     assert "factor_ic_0" not in fields
     assert len(fields) == len(set(fields))
     assert fields[: len(BASE_MARKET_FIELDS)] == list(BASE_MARKET_FIELDS)
+
+
+def test_state_dim_accepts_factor_name_sequence():
+    assert state_dim(FACTOR_NAMES) == len(state_fields(FACTOR_NAMES))
+
+
+def test_series_market_state_is_rejected():
+    with pytest.raises((TypeError, ValueError)):
+        StateBuilder({}, pd.Series([1.0], index=[pd.Timestamp("2020-01-01")]))
 
 
 def test_nan_in_one_panel_factor_does_not_zero_other_exposures():
