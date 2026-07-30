@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from scripts.config import get_config, FACTOR_NAMES, K
 from scripts.env import PortfolioEnv
+from scripts.state import exogenous_fields
 
 
 def _toy_features():
@@ -17,11 +18,15 @@ def _toy_features():
     return pd.DataFrame(rows)
 
 
+def _toy_market_state(dates):
+    return pd.DataFrame(0.1, index=pd.DatetimeIndex(dates), columns=exogenous_fields(FACTOR_NAMES))
+
+
 def test_step_info_has_ret_term():
     cfg = get_config()
     feats = _toy_features()
-    idx = pd.Series(np.zeros(1), index=[feats["trade_date"].min()])
-    env = PortfolioEnv(feats, idx, cfg, feats["trade_date"].min(), feats["trade_date"].max())
+    market_state = _toy_market_state(feats["trade_date"].unique())
+    env = PortfolioEnv(feats, market_state, cfg, feats["trade_date"].min(), feats["trade_date"].max())
     env.reset(seed=0)
     _, reward, _, _, info = env.step(np.zeros(K, dtype=np.float32))
     assert "ret_term" in info["reward_parts"]

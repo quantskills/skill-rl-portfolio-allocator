@@ -12,28 +12,30 @@ import pandas as pd
 from scripts.config import (
     get_config, FACTOR_NAMES, K, STRATEGY_ID, DATA_VERSION
 )
-from scripts.env import PortfolioEnv
+from scripts.env import PortfolioEnv, effective_range
 from scripts.train import train_ppo, load_ppo, select_device
 
 
 def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
-                        seed: int, checkpoint_path: str) -> str:
+                        seed: int, checkpoint_path: str,
+                        market_state_df: pd.DataFrame) -> str:
     dates = pd.to_datetime(features_df["trade_date"])
-    start, end = dates.min(), dates.max()
-    idx = pd.Series(np.zeros(1), index=[dates.min()])
-    env = PortfolioEnv(features_df, idx, cfg, start, end)
+    start, end = effective_range(features_df, market_state_df, dates.min(), dates.max())
+    print(f"effective range: {start.date()} ~ {end.date()}")
+    env = PortfolioEnv(features_df, market_state_df, cfg, start, end)
     device = select_device(cfg["train_device"])
     train_ppo(env, total_timesteps=timesteps, seed=seed, device=device, save_path=checkpoint_path)
     return checkpoint_path
 
 
-def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str) -> pd.DataFrame:
+def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str,
+                 market_state_df: pd.DataFrame) -> pd.DataFrame:
     dates = pd.to_datetime(features_df["trade_date"]).unique()
     dates = sorted(dates)
     ctx_start = dates[max(0, len(dates) - 60)]
     end = dates[-1]
-    idx = pd.Series(np.zeros(1), index=[ctx_start])
-    env = PortfolioEnv(features_df, idx, cfg, ctx_start, end)
+    ctx_start, end = effective_range(features_df, market_state_df, ctx_start, end)
+    env = PortfolioEnv(features_df, market_state_df, cfg, ctx_start, end)
     model = load_ppo(model_path, env)
 
     obs, _ = env.reset(seed=0)
@@ -121,6 +123,7 @@ def main() -> None:
     cfg = get_config()
     root = pathlib.Path(__file__).resolve().parent.parent
     feats_path = root / "data" / "features.parquet"
+    market_state_path = root / "data" / "market_state.parquet"
     ckpt = root / "checkpoints" / "production.zip"
     out_path = root.parent / "rl-portfolio-allocator-production" / "data" / "allocations.parquet"
 
@@ -132,12 +135,18 @@ def main() -> None:
     args = p.parse_args()
 
     feats = pd.read_parquet(feats_path)
+    market_state = pd.read_parquet(market_state_path)
     if args.retrain:
-        retrain_production(feats, cfg, args.timesteps, seed=0, checkpoint_path=str(ckpt))
+        retrain_production(
+            feats, cfg, args.timesteps, seed=0,
+            checkpoint_path=str(ckpt), market_state_df=market_state,
+        )
         print(f"production checkpoint saved: {ckpt}")
     if not ckpt.exists():
         raise SystemExit(f"no production checkpoint at {ckpt}; run --retrain first")
-    allocations = infer_latest(feats, cfg, model_path=str(ckpt))
+    allocations = infer_latest(
+        feats, cfg, model_path=str(ckpt), market_state_df=market_state
+    )
     save_allocations(allocations, str(out_path))
     print(f"allocations saved: {out_path}  rows={len(allocations)}")
 

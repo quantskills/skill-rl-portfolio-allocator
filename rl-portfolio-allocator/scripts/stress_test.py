@@ -47,9 +47,15 @@ STRESS_SEGMENTS = [
 ]
 
 
-def _has_enough(feats: pd.DataFrame, train_end: str, min_years: int) -> tuple[bool, str, str]:
+def _has_enough(feats: pd.DataFrame, market_state: pd.DataFrame,
+                train_end: str, min_years: int) -> tuple[bool, str, str]:
     d = pd.to_datetime(feats["trade_date"])
-    data_start = d.min()
+    state_dates = (pd.to_datetime(market_state["trade_date"]) if "trade_date" in market_state
+                   else pd.to_datetime(market_state.index))
+    common = pd.DatetimeIndex(d.unique()).intersection(state_dates.unique())
+    if len(common) == 0:
+        return False, "n/a", "no feature/market_state date intersection"
+    data_start = common.min()
     train_end_ts = pd.Timestamp(train_end)
     if data_start >= train_end_ts:
         return False, str(data_start.date()), f"data_start {data_start.date()} >= train_end {train_end}"
@@ -76,15 +82,18 @@ def _core_metrics(features_df: pd.DataFrame, cfg: dict,
     }
 
 
-def run_all_stress(features_df: pd.DataFrame, cfg: dict, timesteps: int = 100_000) -> list:
+def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
+                   cfg: dict, timesteps: int = 100_000) -> list:
     out = []
     for seg in STRESS_SEGMENTS:
-        ok, data_start, reason = _has_enough(features_df, seg["train_end"], seg["required_min_years"])
+        ok, data_start, reason = _has_enough(
+            features_df, market_state_df, seg["train_end"], seg["required_min_years"]
+        )
         if not ok:
             out.append({"name": seg["name"], "skipped": True, "reason": reason})
             continue
         res = run_backtest(
-            features_df=features_df, cfg=cfg,
+            features_df=features_df, market_state_df=market_state_df, cfg=cfg,
             train_start=data_start, train_end=seg["train_end"],
             test_start=seg["test_start"], test_end=seg["test_end"],
             timesteps=timesteps, seed=0,
@@ -102,10 +111,11 @@ def main() -> None:
     cfg = get_config()
     root = pathlib.Path(__file__).resolve().parent.parent
     feats = pd.read_parquet(root / "data" / "features.parquet")
+    market_state = pd.read_parquet(root / "data" / "market_state.parquet")
     p = argparse.ArgumentParser()
     p.add_argument("--timesteps", type=int, default=100_000)
     args = p.parse_args()
-    results = run_all_stress(feats, cfg, timesteps=args.timesteps)
+    results = run_all_stress(feats, market_state, cfg, timesteps=args.timesteps)
     print("=== Stress Test ===")
     for r in results:
         if r.get("skipped"):

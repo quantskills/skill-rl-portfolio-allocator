@@ -4,6 +4,7 @@ import pandas as pd
 from scripts.config import get_config, FACTOR_NAMES, K
 from scripts.env import PortfolioEnv
 from scripts.train import train_ppo
+from scripts.state import exogenous_fields
 
 
 def _toy_env():
@@ -18,8 +19,8 @@ def _toy_env():
                 row[fn] = float((i % 5) - 2)
             rows.append(row)
     feats = pd.DataFrame(rows)
-    idx = pd.Series(np.zeros(1), index=[feats["trade_date"].min()])
-    return PortfolioEnv(feats, idx, cfg, feats["trade_date"].min(), feats["trade_date"].max())
+    market_state = pd.DataFrame(0.1, index=dates, columns=exogenous_fields(FACTOR_NAMES))
+    return PortfolioEnv(feats, market_state, cfg, dates.min(), dates.max())
 
 
 def test_train_ppo_accepts_eval_kwargs():

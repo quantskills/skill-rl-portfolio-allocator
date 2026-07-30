@@ -5,6 +5,7 @@ import pathlib
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 
 
 def select_device(pref: str) -> str:
@@ -78,11 +79,11 @@ def load_ppo(path: str, env):
 def main() -> None:
     import argparse
     from scripts.config import get_config
-    from scripts.env import make_env
+    from scripts.env import effective_range, make_env
     cfg = get_config()
     root = pathlib.Path(__file__).resolve().parent.parent
     features_path = root / "data" / "features.parquet"
-    index_path = root / "data" / "index_returns.parquet"
+    market_state_path = root / "data" / "market_state.parquet"
     ckpt = root / "checkpoints" / "smoke.zip"
 
     ap = argparse.ArgumentParser()
@@ -90,7 +91,13 @@ def main() -> None:
                     help="训练步数;默认 5000 为快速自检(smoke)")
     args = ap.parse_args()
 
-    env = make_env(str(features_path), str(index_path), cfg, cfg["start_date"], cfg["end_date"] or "2099-12-31")
+    feats = pd.read_parquet(features_path)
+    market_state = pd.read_parquet(market_state_path)
+    start, end = effective_range(
+        feats, market_state, cfg["start_date"], cfg["end_date"] or "2099-12-31"
+    )
+    print(f"effective range: {start.date()} ~ {end.date()}")
+    env = make_env(str(features_path), str(market_state_path), cfg, start, end)
     device = select_device(cfg["train_device"])
     print(f"train device: {device}")
     model = train_ppo(env, total_timesteps=args.timesteps, seed=0, device=device, save_path=str(ckpt))

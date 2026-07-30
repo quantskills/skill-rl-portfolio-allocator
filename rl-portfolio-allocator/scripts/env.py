@@ -19,7 +19,7 @@ from scripts.portfolio import (
     composite_score, select_long_short, target_weights, freeze_suspended
 )
 from scripts.reward import DSRState, hhi, compose_reward
-from scripts.state import StateBuilder, state_dim
+from scripts.state import StateBuilder, exogenous_fields, state_dim
 
 
 class PortfolioEnv(gym.Env):
@@ -28,7 +28,7 @@ class PortfolioEnv(gym.Env):
     def __init__(
         self,
         features_df: pd.DataFrame,
-        index_returns: pd.Series,
+        market_state_df: pd.DataFrame,
         cfg: dict,
         start_date,
         end_date,
@@ -37,13 +37,39 @@ class PortfolioEnv(gym.Env):
         super().__init__()
         self.cfg = cfg
         self.nonlinear_impact = nonlinear_impact
+        if not isinstance(market_state_df, pd.DataFrame):
+            raise TypeError("market_state_df must be an explicit pandas DataFrame")
         df = features_df.copy()
         df["trade_date"] = pd.to_datetime(df["trade_date"])
-        df = df[(df["trade_date"] >= pd.Timestamp(start_date)) & (df["trade_date"] <= pd.Timestamp(end_date))]
+        requested_start = pd.Timestamp(start_date)
+        requested_end = pd.Timestamp(end_date)
+        df = df[(df["trade_date"] >= requested_start) & (df["trade_date"] <= requested_end)]
         df = df.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+        market_state = market_state_df.copy()
+        if "trade_date" in market_state.columns:
+            market_state["trade_date"] = pd.to_datetime(market_state["trade_date"])
+            market_state = market_state.set_index("trade_date")
+        else:
+            market_state.index = pd.to_datetime(market_state.index)
+        market_state = market_state.sort_index()
+        feature_dates = pd.DatetimeIndex(df["trade_date"].unique()).sort_values()
+        state_dates = pd.DatetimeIndex(market_state.index.unique()).sort_values()
+        missing = feature_dates.difference(state_dates)
+        if len(missing):
+            raise ValueError(
+                "missing causal market state dates in requested range: "
+                f"{missing[0].date()}..{missing[-1].date()} ({len(missing)} dates)"
+            )
+        dates = feature_dates.intersection(state_dates)
+        if len(dates) == 0:
+            raise ValueError("features and market_state have no dates in requested range")
+        missing_fields = set(exogenous_fields(FACTOR_NAMES)) - set(market_state.columns)
+        if missing_fields:
+            raise ValueError(f"market_state missing columns: {sorted(missing_fields)}")
         self.features = df
+        self.market_state = market_state.loc[dates]
 
-        self.dates = sorted(df["trade_date"].unique())
+        self.dates = list(dates)
         self.symbols = sorted(df["symbol"].unique())
         self._sym_to_idx = {s: i for i, s in enumerate(self.symbols)}
         self.n = len(self.symbols)
@@ -64,11 +90,9 @@ class PortfolioEnv(gym.Env):
             self._ret_by_date[d] = r
             self._susp_by_date[d] = s
 
-        self.index_returns = index_returns.sort_index()
-
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(K,), dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(state_dim(K),), dtype=np.float32,
+            low=-np.inf, high=np.inf, shape=(state_dim(FACTOR_NAMES),), dtype=np.float32,
         )
         self._reset_internal()
 
@@ -82,7 +106,7 @@ class PortfolioEnv(gym.Env):
             panels[d] = pd.DataFrame(F, index=self.symbols, columns=FACTOR_NAMES)
         self.state_builder = StateBuilder(
             factor_panel_by_date=panels,
-            index_returns=self.index_returns,
+            market_state=self.market_state,
             portfolio_returns_history=[],
             recent_turnover_history=[],
         )
@@ -171,8 +195,23 @@ class PortfolioEnv(gym.Env):
         return obs, float(reward), terminated, truncated, info
 
 
-def make_env(features_path, index_returns_path, cfg, start, end) -> PortfolioEnv:
+def effective_range(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
+                   start, end) -> tuple[pd.Timestamp, pd.Timestamp]:
+    if not isinstance(market_state_df, pd.DataFrame):
+        raise TypeError("market_state_df must be an explicit pandas DataFrame")
+    feature_dates = pd.to_datetime(features_df["trade_date"]).unique()
+    if "trade_date" in market_state_df.columns:
+        state_dates = pd.to_datetime(market_state_df["trade_date"]).unique()
+    else:
+        state_dates = pd.to_datetime(market_state_df.index).unique()
+    common = pd.DatetimeIndex(feature_dates).intersection(state_dates).sort_values()
+    requested = common[(common >= pd.Timestamp(start)) & (common <= pd.Timestamp(end))]
+    if len(requested) == 0:
+        raise ValueError("features and market_state have no dates in requested range")
+    return requested[0], requested[-1]
+
+
+def make_env(features_path, market_state_path, cfg, start, end) -> PortfolioEnv:
     feats = pd.read_parquet(features_path)
-    idx = pd.read_parquet(index_returns_path)
-    idx = pd.Series(idx["ret"].values, index=pd.to_datetime(idx["trade_date"]))
-    return PortfolioEnv(feats, idx, cfg, start, end)
+    market_state = pd.read_parquet(market_state_path)
+    return PortfolioEnv(feats, market_state, cfg, start, end)
