@@ -13,6 +13,25 @@ from scripts.config import FACTOR_NAMES, get_config
 MARKET_STATE_SCHEMA_VERSION = "market-state-v1"
 
 
+def distribution_shift_report(
+    train: pd.DataFrame,
+    other: pd.DataFrame,
+    fields: list[str] | tuple[str, ...],
+    limit: float = 5,
+) -> dict:
+    details: dict[str, dict[str, float | bool]] = {}
+    for field in fields:
+        train_values = pd.to_numeric(train[field], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        other_values = pd.to_numeric(other[field], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if train_values.empty or other_values.empty:
+            shift = float("inf")
+        else:
+            scale = float(train_values.std(ddof=1)) / np.sqrt(len(train_values))
+            shift = abs(float(other_values.mean() - train_values.mean())) / scale if scale > 0 else 0.0
+        details[field] = {"standardized_mean_shift": shift, "passed": bool(shift <= limit)}
+    return {"fields": details, "limit": limit, "passed": bool(details) and all(item["passed"] for item in details.values())}
+
+
 def _require_columns(frame: pd.DataFrame, required: set[str], name: str) -> None:
     missing = required - set(frame.columns)
     if missing:

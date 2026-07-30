@@ -1,86 +1,153 @@
-"""RL State 构造:波动/相关性/因子暴露/持仓。所有量只用 ≤ t 的信息。"""
+"""Strictly causal state construction for the portfolio allocator."""
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional
+
 import numpy as np
 import pandas as pd
 
 
+STATE_SCHEMA_VERSION = "state-v1"
+BASE_MARKET_FIELDS = (
+    "market_ret_20",
+    "market_ret_60",
+    "market_vol_20",
+    "market_vol_60",
+    "market_drawdown_60",
+    "market_vol_regime",
+)
+
+
+def exogenous_fields(factor_names: list[str] | tuple[str, ...]) -> list[str]:
+    fields = list(BASE_MARKET_FIELDS)
+    for name in factor_names:
+        fields.extend(
+            [
+                f"{name}_ic_mean_20",
+                f"{name}_ic_mean_60",
+                f"{name}_icir_20",
+                f"{name}_ic_positive_20",
+                f"{name}_factor_ret_20",
+                f"{name}_factor_ret_60",
+                f"{name}_factor_vol_20",
+                f"{name}_factor_vol_60",
+            ]
+        )
+    fields.extend(["factor_corr_20", "factor_corr_60"])
+    return fields
+
+
+def state_fields(factor_names: list[str] | tuple[str, ...]) -> list[str]:
+    names = list(factor_names)
+    fields = exogenous_fields(names)
+    fields.extend(f"exposure_{name}" for name in names)
+    fields.extend(f"prev_factor_w_{name}" for name in names)
+    fields.extend(
+        [
+            "cash",
+            "recent_turnover",
+            "portfolio_vol_20",
+            "portfolio_vol_60",
+            "portfolio_drawdown",
+        ]
+    )
+    return fields
+
+
 def state_dim(k: int) -> int:
-    # [vol_20, vol_60, market_vol_20, vol_regime_q] (4)
-    # + [avg_corr_20, avg_corr_60] (2)
-    # + exposure (k) + factor_ic (k) + prev_factor_w (k) (3*k)
-    # + [cash, recent_to] (2)
-    # + [volatility_regime, drawdown_flag] (2) ← NEW market regime indicators
-    return 8 + 3 * k + 2
+    return len(state_fields([f"factor_{i}" for i in range(k)]))
 
 
-def _safe_std(x: np.ndarray) -> float:
-    return float(np.std(x)) if len(x) >= 2 else 0.0
+def _safe_std(values: np.ndarray) -> float:
+    return float(np.std(values)) if len(values) >= 2 else 0.0
 
 
-def _quantile_rank(x: float, arr: np.ndarray) -> float:
-    if len(arr) == 0:
-        return 0.5
-    return float((arr <= x).mean())
+def _finite_panel_exposure(panel: pd.DataFrame | None, holdings_w: np.ndarray, names: list[str]) -> np.ndarray:
+    if panel is None:
+        return np.zeros(len(names), dtype=float)
+    exposure = np.zeros(len(names), dtype=float)
+    weights = np.asarray(holdings_w, dtype=float)[: len(panel)]
+    for i, name in enumerate(names):
+        if name not in panel:
+            continue
+        values = pd.to_numeric(panel[name], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(values[: len(weights)])
+        exposure[i] = float(np.dot(values[: len(weights)][finite], weights[finite]))
+    return exposure
 
 
 @dataclass
 class StateBuilder:
     factor_panel_by_date: dict
-    index_returns: pd.Series
+    market_state: pd.DataFrame | pd.Series | None = None
     portfolio_returns_history: list = field(default_factory=list)
     recent_turnover_history: list = field(default_factory=list)
-    _vol_history: list = field(default_factory=list)
+    index_returns: pd.Series | None = None
+
+    def __post_init__(self) -> None:
+        if self.market_state is None:
+            self.market_state = self.index_returns
+        self._legacy_market_state = isinstance(self.market_state, pd.Series)
+        if isinstance(self.market_state, pd.Series):
+            # Compatibility for the unchanged legacy environment: it has no
+            # precomputed market-state table, so use finite neutral values.
+            panel_dates = pd.to_datetime(list(self.factor_panel_by_date))
+            dates = panel_dates if len(panel_dates) else pd.to_datetime(self.market_state.index)
+            self.market_state = pd.DataFrame(index=dates)
+            self.market_state = self.market_state.reindex(columns=exogenous_fields([]), fill_value=0.0)
+            self.market_state.loc[:, :] = 0.0
+        else:
+            self.market_state = self.market_state.copy()
+            self.market_state.index = pd.to_datetime(self.market_state.index)
+        self._field_index: dict[str, int] = {}
+
+    def field_index(self, field_name: str, factor_names: list[str] | tuple[str, ...] | None = None) -> int:
+        if not self._field_index or (factor_names is not None and field_name not in self._field_index):
+            names = list(factor_names or self._infer_factor_names())
+            self._field_index = {name: i for i, name in enumerate(state_fields(names))}
+        return self._field_index[field_name]
+
+    def _infer_factor_names(self) -> list[str]:
+        panel = next(iter(self.factor_panel_by_date.values()), None)
+        return list(panel.columns) if panel is not None else []
 
     def build(
         self,
         date,
         holdings_w: np.ndarray,
-        factor_names: list,
+        factor_names: list[str],
         prev_factor_w: np.ndarray,
         cash: float,
     ) -> np.ndarray:
-        rets = np.asarray(self.portfolio_returns_history, dtype=float)
-        vol_20 = _safe_std(rets[-20:])
-        vol_60 = _safe_std(rets[-60:])
-        idx_slice = self.index_returns.loc[:date].values
-        market_vol_20 = _safe_std(idx_slice[-20:])
-        self._vol_history.append(vol_20)
-        vol_regime_q = _quantile_rank(vol_20, np.asarray(self._vol_history[:-1]))
-
-        F = self.factor_panel_by_date.get(date)
-        if F is not None and len(F) >= 5:
-            corr = F.corr().values
-            iu = np.triu_indices_from(corr, k=1)
-            if iu[0].size > 0 and np.isfinite(corr[iu]).any():
-                avg_corr_20 = float(np.nanmean(corr[iu]))
-            else:
-                avg_corr_20 = 0.0
+        names = list(factor_names)
+        fields = state_fields(names)
+        try:
+            row = self.market_state.loc[pd.Timestamp(date)]
+        except KeyError as exc:
+            raise KeyError(f"missing market state for {date}") from exc
+        if self._legacy_market_state:
+            exogenous = np.zeros(len(exogenous_fields(names)), dtype=float)
         else:
-            avg_corr_20 = 0.0
-        avg_corr_60 = avg_corr_20
+            exogenous = pd.to_numeric(row.reindex(exogenous_fields(names)), errors="coerce").to_numpy(dtype=float)
+        if not np.isfinite(exogenous).all():
+            raise ValueError(f"non-finite exogenous market state for {date}")
 
-        if F is not None:
-            exposure = F.values.T @ holdings_w[: len(F)] if len(holdings_w) >= len(F) else np.zeros(len(factor_names))
-        else:
-            exposure = np.zeros(len(factor_names))
-
-        factor_ic = np.zeros(len(factor_names))
-
-        recent_to = float(np.mean(self.recent_turnover_history[-20:])) if self.recent_turnover_history else 0.0
-
-        # Market regime indicators: detect structural breaks
-        vol_regime = 1.0 if vol_20 > 2 * max(np.percentile(self._vol_history[-252:], 75), 0.01) else 0.0
-        drawdown_flag = 1.0 if (self.portfolio_returns_history and np.sum(np.array(self.portfolio_returns_history[-60:]) < 0) > 30) else 0.0
-
-        vec = np.concatenate([
-            np.array([vol_20, vol_60, market_vol_20, vol_regime_q], dtype=float),
-            np.array([avg_corr_20, avg_corr_60], dtype=float),
-            exposure.astype(float),
-            factor_ic.astype(float),
-            prev_factor_w.astype(float),
-            np.array([cash, recent_to, vol_regime, drawdown_flag], dtype=float),
-        ])
-        vec = np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
-        return vec.astype(np.float32)
+        panel = self.factor_panel_by_date.get(date)
+        exposure = _finite_panel_exposure(panel, holdings_w, names)
+        returns = np.asarray(self.portfolio_returns_history, dtype=float)
+        recent = np.asarray(self.recent_turnover_history[-20:], dtype=float)
+        wealth = np.cumprod(1.0 + returns[-60:]) if len(returns) else np.array([])
+        drawdown = float(wealth[-1] / np.max(wealth) - 1.0) if len(wealth) else 0.0
+        portfolio = np.array(
+            [
+                float(cash),
+                float(np.mean(recent)) if len(recent) else 0.0,
+                _safe_std(returns[-20:]),
+                _safe_std(returns[-60:]),
+                drawdown,
+            ],
+            dtype=float,
+        )
+        values = np.concatenate([exogenous, exposure, np.asarray(prev_factor_w, dtype=float), portfolio])
+        self._field_index = {name: i for i, name in enumerate(fields)}
+        return values.astype(np.float32)
