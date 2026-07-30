@@ -53,3 +53,36 @@ def test_future_mutation_does_not_change_past_state(synthetic_inputs):
 
 def test_schema_version_is_explicit():
     assert MARKET_STATE_SCHEMA_VERSION == "market-state-v1"
+
+
+def test_market_state_schema_names_and_warmup(synthetic_inputs):
+    features, index_returns = synthetic_inputs
+    state = build_market_state(features, index_returns, get_config())
+
+    expected_market = {
+        "market_ret_20",
+        "market_ret_60",
+        "market_vol_20",
+        "market_vol_60",
+        "market_drawdown_60",
+        "market_vol_regime",
+    }
+    assert expected_market <= set(state.columns)
+    for factor in FACTOR_NAMES:
+        assert {
+            f"{factor}_factor_ret_20",
+            f"{factor}_factor_ret_60",
+            f"{factor}_factor_vol_20",
+            f"{factor}_factor_vol_60",
+        } <= set(state.columns)
+        assert f"{factor}_return_mean_20" not in state.columns
+        assert f"{factor}_return_vol_20" not in state.columns
+
+    assert state["market_ret_20"].iloc[:19].isna().all()
+    assert state["market_ret_20"].iloc[19:].notna().all()
+    assert state["market_vol_20"].iloc[:19].isna().all()
+    assert state["market_vol_60"].iloc[:59].isna().all()
+    assert state["market_drawdown_60"].iloc[:59].isna().all()
+    assert state["market_vol_regime"].iloc[:19].isna().all()
+    assert state["mom_20_factor_ret_20"].iloc[:19].isna().all()
+    assert state["mom_20_factor_ret_60"].iloc[:59].isna().all()

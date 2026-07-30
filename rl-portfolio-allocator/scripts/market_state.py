@@ -84,7 +84,7 @@ def compute_daily_factor_returns(features: pd.DataFrame, cfg: dict | None = None
 
 def _rolling_drawdown(returns: pd.Series, window: int = 60) -> pd.Series:
     wealth = (1.0 + returns.fillna(0.0)).cumprod()
-    peak = wealth.rolling(window, min_periods=1).max()
+    peak = wealth.rolling(window, min_periods=window).max()
     return wealth / peak - 1.0
 
 
@@ -96,7 +96,7 @@ def rolling_mean_factor_corr(features: pd.DataFrame, window: int) -> pd.Series:
         upper = corr.to_numpy()[np.triu_indices(len(FACTOR_NAMES), 1)]
         daily.append((date, float(np.nanmean(upper)) if np.isfinite(upper).any() else np.nan))
     series = pd.Series(dict(daily), dtype=float).sort_index()
-    return series.rolling(window, min_periods=1).mean()
+    return series.rolling(window, min_periods=window).mean()
 
 
 def _market_features(index_returns: pd.DataFrame) -> pd.DataFrame:
@@ -106,13 +106,13 @@ def _market_features(index_returns: pd.DataFrame) -> pd.DataFrame:
     idx = idx.sort_values("trade_date").drop_duplicates("trade_date").set_index("trade_date")
     ret = idx["ret"].replace([np.inf, -np.inf], np.nan)
     out = pd.DataFrame(index=idx.index)
-    out["market_ret_20"] = (1.0 + ret).rolling(20, min_periods=1).apply(np.prod, raw=True) - 1.0
-    out["market_ret_60"] = (1.0 + ret).rolling(60, min_periods=1).apply(np.prod, raw=True) - 1.0
-    out["vol_20"] = ret.rolling(20, min_periods=2).std()
-    out["vol_60"] = ret.rolling(60, min_periods=2).std()
-    out["drawdown_60"] = _rolling_drawdown(ret, 60)
+    out["market_ret_20"] = (1.0 + ret).rolling(20, min_periods=20).apply(np.prod, raw=True) - 1.0
+    out["market_ret_60"] = (1.0 + ret).rolling(60, min_periods=60).apply(np.prod, raw=True) - 1.0
+    out["market_vol_20"] = ret.rolling(20, min_periods=20).std()
+    out["market_vol_60"] = ret.rolling(60, min_periods=60).std()
+    out["market_drawdown_60"] = _rolling_drawdown(ret, 60)
     expanding_vol = ret.expanding(min_periods=2).std()
-    out["vol_regime"] = out["vol_20"] / expanding_vol.replace(0.0, np.nan)
+    out["market_vol_regime"] = out["market_vol_20"] / expanding_vol.replace(0.0, np.nan)
     return out.reset_index()
 
 
@@ -123,20 +123,21 @@ def build_market_state(
     market = _market_features(index_returns)
     ic = compute_daily_factor_ic(features)
     for factor in FACTOR_NAMES:
-        ic[f"{factor}_ic_mean_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=1).mean()
-        ic[f"{factor}_ic_mean_60"] = ic[f"{factor}_ic"].rolling(60, min_periods=1).mean()
-        ic[f"{factor}_icir_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=2).mean() / ic[f"{factor}_ic"].rolling(20, min_periods=2).std()
-        ic[f"{factor}_ic_positive_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=1).apply(lambda x: np.mean(x > 0), raw=True)
+        ic[f"{factor}_ic_mean_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=20).mean()
+        ic[f"{factor}_ic_mean_60"] = ic[f"{factor}_ic"].rolling(60, min_periods=60).mean()
+        ic[f"{factor}_icir_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=20).mean() / ic[f"{factor}_ic"].rolling(20, min_periods=20).std()
+        ic[f"{factor}_ic_positive_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=20).apply(lambda x: np.mean(x > 0), raw=True)
     factor_returns = compute_daily_factor_returns(features, cfg)
     for factor in FACTOR_NAMES:
         col = f"{factor}_return"
-        factor_returns[f"{factor}_return_mean_20"] = factor_returns[col].rolling(20, min_periods=1).mean()
-        factor_returns[f"{factor}_return_mean_60"] = factor_returns[col].rolling(60, min_periods=1).mean()
-        factor_returns[f"{factor}_return_vol_20"] = factor_returns[col].rolling(20, min_periods=2).std()
-        factor_returns[f"{factor}_return_vol_60"] = factor_returns[col].rolling(60, min_periods=2).std()
+        factor_returns[f"{factor}_factor_ret_20"] = factor_returns[col].rolling(20, min_periods=20).mean()
+        factor_returns[f"{factor}_factor_ret_60"] = factor_returns[col].rolling(60, min_periods=60).mean()
+        factor_returns[f"{factor}_factor_vol_20"] = factor_returns[col].rolling(20, min_periods=20).std()
+        factor_returns[f"{factor}_factor_vol_60"] = factor_returns[col].rolling(60, min_periods=60).std()
     factor_returns["factor_corr_20"] = rolling_mean_factor_corr(features, 20).reindex(pd.to_datetime(factor_returns["trade_date"])).to_numpy()
     factor_returns["factor_corr_60"] = rolling_mean_factor_corr(features, 60).reindex(pd.to_datetime(factor_returns["trade_date"])).to_numpy()
     state = market.merge(ic, on="trade_date", how="outer").merge(factor_returns, on="trade_date", how="outer")
+    state = state.drop(columns=[f"{factor}_return" for factor in FACTOR_NAMES])
     state = state.sort_values("trade_date").reset_index(drop=True)
     state["schema_version"] = MARKET_STATE_SCHEMA_VERSION
     numeric = state.select_dtypes(include=[np.number]).columns
