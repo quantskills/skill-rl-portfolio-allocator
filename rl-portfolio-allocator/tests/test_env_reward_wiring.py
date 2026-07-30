@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 from scripts.config import get_config, FACTOR_NAMES, K
 from scripts.env import PortfolioEnv
 from scripts.state import exogenous_fields
@@ -33,3 +34,12 @@ def test_step_info_has_ret_term():
     # ret_term should equal reward_ret_weight * net_ret
     assert abs(info["reward_parts"]["ret_term"]
                - cfg["reward_ret_weight"] * info["net_ret"]) < 1e-12
+
+
+def test_duplicate_market_state_dates_are_rejected():
+    cfg = get_config()
+    feats = _toy_features()
+    market_state = _toy_market_state(feats["trade_date"].unique())
+    market_state = pd.concat([market_state, market_state.iloc[[0]]])
+    with pytest.raises(ValueError, match="duplicate market state dates"):
+        PortfolioEnv(feats, market_state, cfg, feats["trade_date"].min(), feats["trade_date"].max())

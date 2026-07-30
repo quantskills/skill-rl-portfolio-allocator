@@ -51,6 +51,8 @@ class PortfolioEnv(gym.Env):
             market_state = market_state.set_index("trade_date")
         else:
             market_state.index = pd.to_datetime(market_state.index)
+        if market_state.index.has_duplicates:
+            raise ValueError("duplicate market state dates")
         market_state = market_state.sort_index()
         feature_dates = pd.DatetimeIndex(df["trade_date"].unique()).sort_values()
         state_dates = pd.DatetimeIndex(market_state.index.unique()).sort_values()
