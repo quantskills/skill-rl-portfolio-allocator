@@ -33,10 +33,12 @@ class PortfolioEnv(gym.Env):
         start_date,
         end_date,
         nonlinear_impact: bool = False,
+        observation_scaler=None,
     ):
         super().__init__()
         self.cfg = cfg
         self.nonlinear_impact = nonlinear_impact
+        self.observation_scaler = observation_scaler
         if not isinstance(market_state_df, pd.DataFrame):
             raise TypeError("market_state_df must be an explicit pandas DataFrame")
         df = features_df.copy()
@@ -98,6 +100,11 @@ class PortfolioEnv(gym.Env):
         )
         self._reset_internal()
 
+    def _scale(self, obs: np.ndarray) -> np.ndarray:
+        if self.observation_scaler is None:
+            return np.asarray(obs, dtype=np.float32)
+        return self.observation_scaler.transform(obs)
+
     def _reset_internal(self):
         self.t = 0
         self.prev_factor_w = np.zeros(K)
@@ -120,7 +127,7 @@ class PortfolioEnv(gym.Env):
             self.dates[self.t], self.prev_stock_w, FACTOR_NAMES,
             self.prev_factor_w, cash=1.0,
         )
-        return obs, {}
+        return self._scale(obs), {}
 
     def step(self, action: np.ndarray):
         d = self.dates[self.t]
@@ -180,7 +187,7 @@ class PortfolioEnv(gym.Env):
                 self.prev_factor_w, cash=max(0.0, 1.0 - long_notional - short_notional),
             )
         else:
-            obs = np.zeros(state_dim(K), dtype=np.float32)
+            obs = self._scale(np.zeros(state_dim(FACTOR_NAMES), dtype=np.float32))
 
         info = {
             **costs,
@@ -194,7 +201,7 @@ class PortfolioEnv(gym.Env):
             "reward_parts": parts,
             "ret_source": "t_plus_1",
         }
-        return obs, float(reward), terminated, truncated, info
+        return self._scale(obs), float(reward), terminated, truncated, info
 
 
 def effective_range(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
