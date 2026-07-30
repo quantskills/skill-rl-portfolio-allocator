@@ -63,12 +63,12 @@ def compute_daily_factor_returns(features: pd.DataFrame, cfg: dict | None = None
             cols = [f"_{factor}_lag", "ret_1d"]
             eligible = eligible_base[cols].replace([np.inf, -np.inf], np.nan).dropna()
             if len(eligible) < 10:
-                row[f"{factor}_return"] = np.nan
+                row[f"{factor}_factor_ret"] = np.nan
                 continue
             ranked = eligible.sort_values(cols[0], kind="mergesort")
             n_side = len(ranked) // 2
             if n_side < 5:
-                row[f"{factor}_return"] = np.nan
+                row[f"{factor}_factor_ret"] = np.nan
                 continue
             short = ranked.iloc[:n_side]["ret_1d"].mean()
             long = ranked.iloc[-n_side:]["ret_1d"].mean()
@@ -77,7 +77,7 @@ def compute_daily_factor_returns(features: pd.DataFrame, cfg: dict | None = None
             target[:n_side] = -0.5 / n_side
             zero = np.zeros_like(target)
             trading_cost = costs.total_costs(zero, target, cfg)["total"]
-            row[f"{factor}_return"] = float(0.5 * long - 0.5 * short - trading_cost)
+            row[f"{factor}_factor_ret"] = float(0.5 * long - 0.5 * short - trading_cost)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -88,15 +88,27 @@ def _rolling_drawdown(returns: pd.Series, window: int = 60) -> pd.Series:
     return wealth / peak - 1.0
 
 
-def rolling_mean_factor_corr(features: pd.DataFrame, window: int) -> pd.Series:
-    df = _sorted_features(features)
-    daily: list[tuple[pd.Timestamp, float]] = []
-    for date, group in df.groupby("trade_date", sort=True):
-        corr = group[FACTOR_NAMES].corr()
-        upper = corr.to_numpy()[np.triu_indices(len(FACTOR_NAMES), 1)]
-        daily.append((date, float(np.nanmean(upper)) if np.isfinite(upper).any() else np.nan))
-    series = pd.Series(dict(daily), dtype=float).sort_index()
-    return series.rolling(window, min_periods=window).mean()
+def rolling_mean_factor_corr(factor_returns: pd.DataFrame, window: int) -> pd.Series:
+    """Return the mean pairwise correlation over a trailing return window."""
+    _require_columns(factor_returns, {"trade_date", *[f"{f}_factor_ret" for f in FACTOR_NAMES]}, "factor_returns")
+    df = factor_returns.copy()
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df = df.sort_values("trade_date").set_index("trade_date")
+    columns = [f"{factor}_factor_ret" for factor in FACTOR_NAMES]
+    values: list[float] = []
+    for end in range(len(df)):
+        sample = df[columns].iloc[max(0, end + 1 - window) : end + 1]
+        if len(sample) < window:
+            values.append(np.nan)
+            continue
+        sample = sample.replace([np.inf, -np.inf], np.nan).dropna()
+        if len(sample) < window:
+            values.append(np.nan)
+            continue
+        corr = sample.corr().to_numpy()
+        upper = corr[np.triu_indices(len(columns), 1)]
+        values.append(float(np.nanmean(upper)) if np.isfinite(upper).any() else np.nan)
+    return pd.Series(values, index=df.index, dtype=float)
 
 
 def _market_features(index_returns: pd.DataFrame) -> pd.DataFrame:
@@ -129,15 +141,15 @@ def build_market_state(
         ic[f"{factor}_ic_positive_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=20).apply(lambda x: np.mean(x > 0), raw=True)
     factor_returns = compute_daily_factor_returns(features, cfg)
     for factor in FACTOR_NAMES:
-        col = f"{factor}_return"
+        col = f"{factor}_factor_ret"
         factor_returns[f"{factor}_factor_ret_20"] = factor_returns[col].rolling(20, min_periods=20).mean()
         factor_returns[f"{factor}_factor_ret_60"] = factor_returns[col].rolling(60, min_periods=60).mean()
         factor_returns[f"{factor}_factor_vol_20"] = factor_returns[col].rolling(20, min_periods=20).std()
         factor_returns[f"{factor}_factor_vol_60"] = factor_returns[col].rolling(60, min_periods=60).std()
-    factor_returns["factor_corr_20"] = rolling_mean_factor_corr(features, 20).reindex(pd.to_datetime(factor_returns["trade_date"])).to_numpy()
-    factor_returns["factor_corr_60"] = rolling_mean_factor_corr(features, 60).reindex(pd.to_datetime(factor_returns["trade_date"])).to_numpy()
+    factor_returns["factor_corr_20"] = rolling_mean_factor_corr(factor_returns, 20).reindex(pd.to_datetime(factor_returns["trade_date"])).to_numpy()
+    factor_returns["factor_corr_60"] = rolling_mean_factor_corr(factor_returns, 60).reindex(pd.to_datetime(factor_returns["trade_date"])).to_numpy()
     state = market.merge(ic, on="trade_date", how="outer").merge(factor_returns, on="trade_date", how="outer")
-    state = state.drop(columns=[f"{factor}_return" for factor in FACTOR_NAMES])
+    state = state.drop(columns=[f"{factor}_factor_ret" for factor in FACTOR_NAMES])
     state = state.sort_values("trade_date").reset_index(drop=True)
     state["schema_version"] = MARKET_STATE_SCHEMA_VERSION
     numeric = state.select_dtypes(include=[np.number]).columns

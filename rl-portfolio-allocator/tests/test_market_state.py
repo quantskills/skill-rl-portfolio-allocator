@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import scripts.market_state as market_state
 from scripts.config import FACTOR_NAMES, get_config
 from scripts.market_state import (
     MARKET_STATE_SCHEMA_VERSION,
@@ -86,3 +87,26 @@ def test_market_state_schema_names_and_warmup(synthetic_inputs):
     assert state["market_vol_regime"].iloc[:19].isna().all()
     assert state["mom_20_factor_ret_20"].iloc[:19].isna().all()
     assert state["mom_20_factor_ret_60"].iloc[:59].isna().all()
+
+
+def test_factor_corr_uses_daily_factor_returns_not_feature_cross_section(synthetic_inputs, monkeypatch):
+    features, index_returns = synthetic_inputs
+    rng = np.random.default_rng(7)
+    features = features.copy()
+    for factor in FACTOR_NAMES:
+        features[factor] = rng.normal(size=len(features))
+
+    dates = index_returns["trade_date"]
+    common_returns = np.sin(np.arange(len(dates)) / 5.0)
+    daily_returns = {"trade_date": dates}
+    for factor in FACTOR_NAMES:
+        daily_returns[f"{factor}_factor_ret"] = common_returns
+    monkeypatch.setattr(
+        market_state,
+        "compute_daily_factor_returns",
+        lambda features, cfg: pd.DataFrame(daily_returns),
+    )
+
+    state = market_state.build_market_state(features, index_returns, get_config())
+    assert state["factor_corr_20"].dropna().iloc[-1] > 0.99
+    assert state["factor_corr_60"].dropna().iloc[-1] > 0.99
