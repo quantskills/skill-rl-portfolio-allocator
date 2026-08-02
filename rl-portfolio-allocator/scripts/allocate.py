@@ -17,6 +17,8 @@ from scripts.env import PortfolioEnv, effective_range
 from scripts.train import train_ppo, load_ppo, select_device
 from scripts.walk_forward import frozen_method_id
 from scripts.validate import run_all
+from scripts.observation import ObservationScaler, collect_training_observations
+from scripts.state import STATE_SCHEMA_VERSION, state_fields
 
 
 def load_research_approval(path) -> dict:
@@ -26,6 +28,8 @@ def load_research_approval(path) -> dict:
     data = json.loads(approval_path.read_text(encoding="utf-8"))
     if data.get("research_ok") is not True:
         raise RuntimeError("research_ok gate did not pass")
+    if data.get("run_mode") == "smoke":
+        raise RuntimeError("approval must come from a full walk-forward run")
     required = {"schema_version", "method_id", "method_path", "gates_path"}
     missing = required - set(data)
     if missing:
@@ -101,26 +105,60 @@ def atomic_publish(candidate_dir, production_dir) -> None:
         shutil.rmtree(backup)
 
 
+def fit_production_scaler(env, seed: int) -> ObservationScaler:
+    observations = collect_training_observations(env, seed=seed)
+    return ObservationScaler.fit(
+        observations,
+        STATE_SCHEMA_VERSION,
+        tuple(state_fields(FACTOR_NAMES)),
+    )
+
+
+def load_production_scaler(path) -> ObservationScaler:
+    return ObservationScaler.load(
+        path,
+        expected_schema=STATE_SCHEMA_VERSION,
+        expected_fields=tuple(state_fields(FACTOR_NAMES)),
+    )
+
+
 def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
                         seed: int, checkpoint_path: str,
-                        market_state_df: pd.DataFrame) -> str:
+                        market_state_df: pd.DataFrame, scaler_path: str | None = None,
+                        metadata_path: str | None = None) -> str:
     dates = pd.to_datetime(features_df["trade_date"])
     start, end = effective_range(features_df, market_state_df, dates.min(), dates.max())
     print(f"effective range: {start.date()} ~ {end.date()}")
     env = PortfolioEnv(features_df, market_state_df, cfg, start, end)
+    scaler = fit_production_scaler(env, seed=seed)
+    env.observation_scaler = scaler
+    scaler_target = pathlib.Path(scaler_path) if scaler_path else pathlib.Path(checkpoint_path).with_name("scaler.json")
+    scaler.save(scaler_target)
     device = select_device(cfg["train_device"])
     train_ppo(env, total_timesteps=timesteps, seed=seed, device=device, save_path=checkpoint_path)
+    metadata_target = pathlib.Path(metadata_path) if metadata_path else pathlib.Path(checkpoint_path).with_name("checkpoint_metadata.json")
+    metadata_target.parent.mkdir(parents=True, exist_ok=True)
+    metadata_target.write_text(json.dumps({
+        "schema_version": STATE_SCHEMA_VERSION,
+        "scaler_path": str(scaler_target),
+        "train_range": {"start": str(start), "end": str(end)},
+        "seed": seed,
+        "timesteps": timesteps,
+    }, indent=2, sort_keys=True), encoding="utf-8")
     return checkpoint_path
 
 
 def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str,
-                 market_state_df: pd.DataFrame) -> pd.DataFrame:
+                 market_state_df: pd.DataFrame, observation_scaler=None) -> pd.DataFrame:
     dates = pd.to_datetime(features_df["trade_date"]).unique()
     dates = sorted(dates)
     ctx_start = dates[max(0, len(dates) - 60)]
     end = dates[-1]
     ctx_start, end = effective_range(features_df, market_state_df, ctx_start, end)
-    env = PortfolioEnv(features_df, market_state_df, cfg, ctx_start, end)
+    env = PortfolioEnv(
+        features_df, market_state_df, cfg, ctx_start, end,
+        observation_scaler=observation_scaler,
+    )
     model = load_ppo(model_path, env)
 
     obs, _ = env.reset(seed=0)
@@ -209,8 +247,8 @@ def main() -> None:
     root = pathlib.Path(__file__).resolve().parent.parent
     feats_path = root / "data" / "features.parquet"
     market_state_path = root / "data" / "market_state.parquet"
-    ckpt = root / "checkpoints" / "production.zip"
-    out_path = root.parent / "rl-portfolio-allocator-production" / "data" / "allocations.parquet"
+    formal_ckpt = root / "checkpoints" / "production.zip"
+    formal_out = root.parent / "rl-portfolio-allocator-production" / "data" / "allocations.parquet"
 
     p = argparse.ArgumentParser()
     grp = p.add_mutually_exclusive_group(required=True)
@@ -219,9 +257,29 @@ def main() -> None:
     p.add_argument("--timesteps", type=int, default=200_000)
     p.add_argument("--approval", required=True,
                    help="research approval.json; production execution fails closed without it")
+    p.add_argument(
+        "--candidate-dir",
+        help="write retrain/inference artifacts to this candidate bundle",
+    )
     args = p.parse_args()
 
     load_research_approval(args.approval)
+
+    candidate = pathlib.Path(args.candidate_dir) if args.candidate_dir else None
+    if args.retrain and candidate is None:
+        raise SystemExit("--retrain requires --candidate-dir; formal production paths are never written")
+    if candidate is not None:
+        candidate.mkdir(parents=True, exist_ok=True)
+        ckpt = candidate / "checkpoint.zip"
+        scaler_path = candidate / "scaler.json"
+        metadata_path = candidate / "checkpoint_metadata.json"
+        out_path = candidate / "allocations.parquet"
+        shutil.copy2(args.approval, candidate / "approval.json")
+    else:
+        ckpt = formal_ckpt
+        scaler_path = None
+        metadata_path = None
+        out_path = formal_out
 
     feats = pd.read_parquet(feats_path)
     market_state = pd.read_parquet(market_state_path)
@@ -229,12 +287,18 @@ def main() -> None:
         retrain_production(
             feats, cfg, args.timesteps, seed=0,
             checkpoint_path=str(ckpt), market_state_df=market_state,
+            scaler_path=str(scaler_path) if scaler_path else None,
+            metadata_path=str(metadata_path) if metadata_path else None,
         )
-        print(f"production checkpoint saved: {ckpt}")
+        print(f"candidate checkpoint saved: {ckpt}" if candidate else f"production checkpoint saved: {ckpt}")
     if not ckpt.exists():
         raise SystemExit(f"no production checkpoint at {ckpt}; run --retrain first")
+    if candidate is not None and not scaler_path.exists():
+        raise SystemExit(f"no candidate scaler at {scaler_path}; candidate is incomplete")
+    scaler = load_production_scaler(scaler_path) if scaler_path and scaler_path.exists() else None
     allocations = infer_latest(
-        feats, cfg, model_path=str(ckpt), market_state_df=market_state
+        feats, cfg, model_path=str(ckpt), market_state_df=market_state,
+        observation_scaler=scaler,
     )
     save_allocations(allocations, str(out_path))
     print(f"allocations saved: {out_path}  rows={len(allocations)}")
