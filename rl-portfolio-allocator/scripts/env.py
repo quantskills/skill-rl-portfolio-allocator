@@ -13,13 +13,53 @@ except ImportError:
     from gym import spaces
 
 from scripts.config import FACTOR_NAMES, K
-from scripts.action_transform import transform_action
+from scripts.action_transform import transform_delta_action
 from scripts.costs import total_costs
 from scripts.portfolio import (
     composite_score, select_long_short, target_weights, freeze_suspended
 )
 from scripts.reward import DSRState, hhi, compose_reward, compose_legacy_dsr_reward
 from scripts.state import StateBuilder, exogenous_fields, state_dim
+from scripts.rebalance import buffered_long_short, project_turnover, weekly_decision_indices
+
+
+def extract_settle_holding_period(prev_w, target_w, settlement_dates, returns_by_date, cfg):
+    """Settle a target portfolio over a period, compounding daily net returns."""
+    dates = list(pd.to_datetime(settlement_dates))
+    if not dates:
+        raise ValueError("settlement_dates must not be empty")
+    prev = np.asarray(prev_w, dtype=float)
+    target = np.asarray(target_w, dtype=float)
+    trade_cfg = dict(cfg)
+    trade_cfg["borrow_rate_annual"] = 0.0
+    trade_costs = total_costs(prev, target, trade_cfg)
+    daily_gross = []
+    daily_net = []
+    borrow_total = 0.0
+    for i, date in enumerate(dates):
+        gross = float(target @ np.asarray(returns_by_date[date], dtype=float))
+        borrow = float(
+            total_costs(target, target, cfg)["borrow"]
+        )
+        borrow_total += borrow
+        day_cost = borrow + (trade_costs["total"] if i == 0 else 0.0)
+        daily_gross.append(gross)
+        daily_net.append(gross - day_cost)
+    costs = {
+        "commission": trade_costs["commission"],
+        "stamp_tax": trade_costs["stamp_tax"],
+        "impact": trade_costs["impact"],
+        "borrow": borrow_total,
+        "total": trade_costs["total"] + borrow_total,
+    }
+    return {
+        "gross_ret": float(np.prod(1.0 + np.asarray(daily_gross)) - 1.0),
+        "net_ret": float(np.prod(1.0 + np.asarray(daily_net)) - 1.0),
+        "daily_gross_rets": daily_gross,
+        "daily_net_rets": daily_net,
+        "settlement_dates": dates,
+        "costs": costs,
+    }
 
 
 class PortfolioEnv(gym.Env):
@@ -73,7 +113,10 @@ class PortfolioEnv(gym.Env):
         self.features = df
         self.market_state = market_state.loc[dates]
 
-        self.dates = list(dates)
+        self.all_dates = list(dates)
+        self.dates = self.all_dates
+        self.decision_indices = weekly_decision_indices(self.all_dates)
+        self.decision_dates = [self.all_dates[i] for i in self.decision_indices]
         self.symbols = sorted(df["symbol"].unique())
         self._sym_to_idx = {s: i for i, s in enumerate(self.symbols)}
         self.n = len(self.symbols)
@@ -125,35 +168,43 @@ class PortfolioEnv(gym.Env):
         super().reset(seed=seed)
         self._reset_internal()
         obs = self.state_builder.build(
-            self.dates[self.t], self.prev_stock_w, FACTOR_NAMES,
+            self.decision_dates[self.t], self.prev_stock_w, FACTOR_NAMES,
             self.prev_factor_w, cash=1.0,
         )
         return self._scale(obs), {}
 
     def step(self, action: np.ndarray):
-        d = self.dates[self.t]
+        d = self.decision_dates[self.t]
         F = self._F_by_date[d]
         susp = self._susp_by_date[d]
 
-        factor_w = transform_action(np.asarray(action, dtype=float), self.prev_factor_w, self.cfg["ema_alpha"])
+        factor_w = transform_delta_action(
+            np.asarray(action, dtype=float), self.prev_factor_w,
+            self.cfg.get("max_delta", 0.2), self.cfg["ema_alpha"],
+        )
         scores = composite_score(F, factor_w)
-        long_idx, short_idx = select_long_short(scores, susp, self.cfg["top_n"], self.cfg["bottom_m"])
+        long_idx, short_idx = buffered_long_short(
+            scores, susp, self.prev_stock_w,
+            self.cfg["top_n"], self.cfg.get("long_exit", self.cfg["top_n"]),
+            self.cfg["bottom_m"], self.cfg.get("short_exit", self.cfg["bottom_m"]),
+        )
         target_w = target_weights(scores, long_idx, short_idx, self.cfg["long_notional"], self.cfg["short_notional_cap"])
         target_w = freeze_suspended(target_w, self.prev_stock_w, susp)
-
-        costs = total_costs(self.prev_stock_w, target_w, self.cfg)
-
+        target_w = project_turnover(
+            self.prev_stock_w, target_w, susp,
+            self.cfg["turnover_budget"], self.cfg["long_notional"], self.cfg["short_notional_cap"],
+        )
         next_t = self.t + 1
-        terminated = False
+        end_idx = self.decision_indices[next_t] if next_t < len(self.decision_indices) else len(self.all_dates) - 1
+        settlement_dates = self.all_dates[self.all_dates.index(d) + 1:end_idx + 1]
+        settled = extract_settle_holding_period(
+            self.prev_stock_w, target_w, settlement_dates, self._ret_by_date, self.cfg,
+        )
+        costs = settled["costs"]
+        gross = settled["gross_ret"]
+        net = settled["net_ret"]
+        terminated = next_t >= len(self.decision_dates) - 1
         truncated = False
-        if next_t >= len(self.dates):
-            gross = 0.0
-            terminated = True
-        else:
-            r_next = self._ret_by_date[self.dates[next_t]]
-            gross = float(target_w @ r_next)
-
-        net = gross - costs["total"]
         turnover = float(np.abs(target_w - self.prev_stock_w).sum())
         long_notional = float(np.clip(target_w, 0, None).sum())
         short_notional = float(np.clip(-target_w, 0, None).sum())
@@ -187,7 +238,7 @@ class PortfolioEnv(gym.Env):
 
         if not terminated:
             obs = self.state_builder.build(
-                self.dates[self.t], self.prev_stock_w, FACTOR_NAMES,
+                self.decision_dates[self.t], self.prev_stock_w, FACTOR_NAMES,
                 self.prev_factor_w, cash=max(0.0, 1.0 - long_notional - short_notional),
             )
         else:
@@ -203,7 +254,11 @@ class PortfolioEnv(gym.Env):
             "hhi": hhi_v, "drawdown": drawdown,
             "diagnostics": {"dsr_metric": dsr_delta},
             "reward_parts": parts,
-            "ret_source": "t_plus_1",
+            "daily_net_rets": settled["daily_net_rets"],
+            "settlement_dates": settled["settlement_dates"],
+            "daily_gross_rets": settled["daily_gross_rets"],
+            "cost_breakdown": costs,
+            "ret_source": "weekly_settlement",
         }
         if self.cfg["reward_variant"] == "legacy_dsr":
             info["dsr"] = dsr_delta

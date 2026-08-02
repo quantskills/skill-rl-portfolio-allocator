@@ -121,7 +121,7 @@ def test_portfolio_env_scales_terminal_observation_once():
     action = np.zeros(env.action_space.shape, dtype=np.float32)
 
     env.reset(seed=0)
-    for _ in range(len(env.dates) - 1):
+    for _ in range(max(0, len(env.decision_dates) - 1)):
         obs, _, terminated, _, _ = env.step(action)
         assert not terminated
     terminal_obs, _, terminated, _, _ = env.step(action)
