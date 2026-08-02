@@ -10,8 +10,10 @@ import pandas as pd
 from scripts.config import get_config, FACTOR_NAMES, K
 from scripts.env import PortfolioEnv, effective_range
 from scripts.train import train_ppo, select_device
+from scripts.market_state import compute_daily_factor_returns
 from scripts.baselines import (
-    equal_weight_rollout, long_only_topn_rollout, static_factor_equal_rollout
+    equal_weight_rollout, long_only_topn_rollout, static_factor_equal_rollout,
+    static_factor_optimized_rollout, rolling_ic_rollout,
 )
 from scripts.metrics import metrics_pack
 from scripts.diagnostics import summarize_rollout, check_degeneracy
@@ -46,6 +48,16 @@ def run_backtest(
     test_env = PortfolioEnv(features_df, market_state_df, cfg, test_start, test_end)
     rl_rets, infos, rl_dates = run_ppo_rollout(model, test_env)
 
+    train_features = features_df.copy()
+    train_features["trade_date"] = pd.to_datetime(train_features["trade_date"])
+    train_features = train_features[
+        (train_features["trade_date"] >= pd.Timestamp(train_start))
+        & (train_features["trade_date"] <= pd.Timestamp(train_end))
+    ]
+    train_factor_returns = compute_daily_factor_returns(train_features, cfg).rename(
+        columns={f"{factor}_factor_ret": factor for factor in FACTOR_NAMES}
+    )
+
     # Online retraining: if specified interval (e.g., 252 days = 1 year), retrain on rolling window
     if online_retrain_interval and online_retrain_interval > 0:
         test_dates = sorted(pd.to_datetime(test_env.dates).unique())
@@ -59,12 +71,18 @@ def run_backtest(
     ew = equal_weight_rollout(features_df, cfg, test_start, test_end)
     lo = long_only_topn_rollout(features_df, cfg, test_start, test_end, np.ones(K) / K)
     sf = static_factor_equal_rollout(features_df, cfg, test_start, test_end)
+    so = static_factor_optimized_rollout(
+        features_df, cfg, test_start, test_end, train_factor_returns
+    )
+    ric = rolling_ic_rollout(features_df, market_state_df, cfg, test_start, test_end)
 
     m = {
         "rl": metrics_pack(rl_rets, "rl"),
         "equal_weight": metrics_pack(ew, "equal_weight"),
         "long_only_topn": metrics_pack(lo, "long_only_topn"),
         "static_factor_equal": metrics_pack(sf, "static_factor_equal"),
+        "static_factor_optimized": metrics_pack(so, "static_factor_optimized"),
+        "rolling_ic": metrics_pack(ric, "rolling_ic"),
     }
     diag = summarize_rollout(infos)
     warns = check_degeneracy(diag, cfg)

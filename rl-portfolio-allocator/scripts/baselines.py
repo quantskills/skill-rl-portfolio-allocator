@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 
 from scripts.config import FACTOR_NAMES, K
-from scripts.costs import total_costs
 from scripts.portfolio import composite_score, target_weights, freeze_suspended
 from scripts.rebalance import buffered_long_short, project_turnover, weekly_decision_indices
 from scripts.env import extract_settle_holding_period
@@ -67,35 +66,24 @@ def _panel(df):
     return symbols, n, F_by, ret_by, susp_by
 
 
-def _step_returns(prev_w, target_w, ret_next, cfg):
-    costs = total_costs(prev_w, target_w, cfg)
-    gross = float(target_w @ ret_next)
-    return gross - costs["total"]
-
-
-def _weekly_factor_rollout(features_df, cfg, start, end, weight_for_date, short_enabled=True):
+def _weekly_rollout(features_df, cfg, start, end, target_for_date):
     df, dates = _iter_dates(features_df, start, end)
     symbols, n, F_by, ret_by, susp_by = _panel(df)
     decision_indices = weekly_decision_indices(dates)
     prev = np.zeros(n)
     out = []
-    for position, index in enumerate(decision_indices[:-1]):
+    for position, index in enumerate(decision_indices):
+        if index >= len(dates) - 1:
+            continue
         d = dates[index]
-        next_index = decision_indices[position + 1]
+        next_index = (
+            decision_indices[position + 1]
+            if position + 1 < len(decision_indices)
+            else len(dates) - 1
+        )
         F = F_by[d]
         susp = susp_by[d]
-        factor_w = weight_for_date(d)
-        scores = composite_score(F, factor_w)
-        long_idx, short_idx = buffered_long_short(
-            scores, susp, prev,
-            cfg["top_n"], cfg.get("long_exit", cfg["top_n"]),
-            cfg["bottom_m"] if short_enabled else 0,
-            cfg.get("short_exit", cfg["bottom_m"]) if short_enabled else 0,
-        )
-        target = target_weights(
-            scores, long_idx, short_idx,
-            cfg["long_notional"], cfg["short_notional_cap"] if short_enabled else 0.0,
-        )
+        target = target_for_date(d, F, susp, prev)
         target = freeze_suspended(target, prev, susp)
         target = project_turnover(
             prev, target, susp, cfg["turnover_budget"],
@@ -110,22 +98,33 @@ def _weekly_factor_rollout(features_df, cfg, start, end, weight_for_date, short_
     return np.asarray(out)
 
 
+def _weekly_factor_rollout(features_df, cfg, start, end, weight_for_date, short_enabled=True):
+    def target_for_date(date, F, susp, prev):
+        factor_w = weight_for_date(date)
+        scores = composite_score(F, factor_w)
+        long_idx, short_idx = buffered_long_short(
+            scores, susp, prev,
+            cfg["top_n"], cfg.get("long_exit", cfg["top_n"]),
+            cfg["bottom_m"] if short_enabled else 0,
+            cfg.get("short_exit", cfg["bottom_m"]) if short_enabled else 0,
+        )
+        return target_weights(
+            scores, long_idx, short_idx,
+            cfg["long_notional"], cfg["short_notional_cap"] if short_enabled else 0.0,
+        )
+
+    return _weekly_rollout(features_df, cfg, start, end, target_for_date)
+
+
 def equal_weight_rollout(features_df, cfg, start, end) -> np.ndarray:
-    df, dates = _iter_dates(features_df, start, end)
-    symbols, n, F_by, ret_by, susp_by = _panel(df)
-    prev = np.zeros(n)
-    out = []
-    for i in range(len(dates) - 1):
-        susp = susp_by[dates[i]]
+    def target_for_date(date, F, susp, prev):
         active = ~susp
-        w = np.zeros(n)
+        w = np.zeros(len(susp))
         if active.sum() > 0:
             w[active] = 1.0 / active.sum()
-        w = freeze_suspended(w, prev, susp)
-        r_next = ret_by[dates[i + 1]]
-        out.append(_step_returns(prev, w, r_next, cfg))
-        prev = w
-    return np.asarray(out)
+        return w
+
+    return _weekly_rollout(features_df, cfg, start, end, target_for_date)
 
 
 def long_only_topn_rollout(features_df, cfg, start, end, static_factor_w: np.ndarray) -> np.ndarray:
