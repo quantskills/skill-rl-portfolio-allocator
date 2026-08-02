@@ -34,6 +34,8 @@ def test_step_uses_default_reward_without_dsr_parts(variant):
     _, reward, _, _, info = env.step(np.zeros(K, dtype=np.float32))
     assert "scaled_net_return" in info["reward_parts"]
     assert "dsr" not in info["reward_parts"]
+    assert "dsr" not in info
+    assert "dsr_metric" in info["diagnostics"]
     assert -5.0 <= reward <= 5.0
 
 

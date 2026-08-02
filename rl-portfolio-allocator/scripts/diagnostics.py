@@ -41,7 +41,10 @@ def summarize_rollout(infos: list, trading_days: int = 252) -> dict:
             "impact_bps_per_day": float(np.mean([i["impact"] for i in infos])) * 1e4,
             "borrow_bps_per_day": float(np.mean([i["borrow"] for i in infos])) * 1e4,
         },
-        "dsr_metric_mean": float(np.mean([i.get("dsr", 0.0) for i in infos])),
+        "dsr_metric_mean": float(np.mean([
+            i.get("diagnostics", {}).get("dsr_metric", i.get("dsr", 0.0))
+            for i in infos
+        ])),
         "reward_breakdown": {
             "scaled_net_return_mean": float(np.mean([i["reward_parts"].get("scaled_net_return", 0.0) for i in infos])),
             "incremental_drawdown_penalty_mean": float(np.mean([i["reward_parts"].get("incremental_drawdown_penalty", i["reward_parts"].get("drawdown_penalty", 0.0)) for i in infos])),

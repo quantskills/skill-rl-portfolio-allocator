@@ -5,6 +5,7 @@ from scripts.config import get_config
 
 def test_reward_defaults():
     cfg = get_config()
+    assert cfg["reward_variant"] == "low"
     assert cfg["reward_scale"] == 100.0
     assert cfg["reward_clip"] == 5.0
     assert cfg["hhi_target"] == 0.03

@@ -39,7 +39,7 @@ DATA_VERSION: str = "real-v1"
 
 
 def get_config() -> dict:
-    reward_variant = os.environ.get("REWARD_VARIANT", "medium")
+    reward_variant = os.environ.get("REWARD_VARIANT", "low")
     if reward_variant not in {"none", "low", "medium", "legacy_dsr"}:
         raise ValueError(f"unknown reward variant: {reward_variant}")
     return {

@@ -200,11 +200,13 @@ class PortfolioEnv(gym.Env):
             "long_notional": long_notional, "short_notional": short_notional,
             "n_long": int(len(long_idx)), "n_short": int(len(short_idx)),
             "factor_w": factor_w.tolist(),
-            "hhi": hhi_v,
-            "dsr": dsr_delta, "drawdown": drawdown,
+            "hhi": hhi_v, "drawdown": drawdown,
+            "diagnostics": {"dsr_metric": dsr_delta},
             "reward_parts": parts,
             "ret_source": "t_plus_1",
         }
+        if self.cfg["reward_variant"] == "legacy_dsr":
+            info["dsr"] = dsr_delta
         return self._scale(obs), float(reward), terminated, truncated, info
 
 
