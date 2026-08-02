@@ -24,7 +24,8 @@ def frozen_method_id(method: dict) -> str:
 
 
 def write_approval(run_root: pathlib.Path, method: dict, gate_report: dict,
-                   run_id: str, created_at: str):
+                   run_id: str, created_at: str, *, run_mode: str = "full",
+                   fold_count: int | None = None, seed_count: int | None = None):
     if gate_report.get("research_ok") is not True:
         return None
     run_root.mkdir(parents=True, exist_ok=True)
@@ -36,6 +37,7 @@ def write_approval(run_root: pathlib.Path, method: dict, gate_report: dict,
         "research_ok": True, "schema_version": method.get("schema_version", "state-v1"),
         "method_id": frozen_method_id(method), "method_path": "method.json",
         "gates_path": "gates.json", "run_id": run_id, "created_at": created_at,
+        "run_mode": run_mode, "fold_count": fold_count, "seed_count": seed_count,
     }
     path = run_root / "approval.json"
     path.write_text(json.dumps(approval, indent=2, sort_keys=True), encoding="utf-8")
@@ -117,7 +119,7 @@ def aggregate_research_summary(test_rows, total_folds: int) -> dict:
 
 def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, tester=None,
                      coverage_checker=None, features_df=None, index_df=None,
-                     cfg=None, timesteps=None) -> dict:
+                     cfg=None, timesteps=None, run_id=None) -> dict:
     """Run validation-only candidate selection followed by one frozen test per seed."""
     folds = list(folds or default_folds())
     if coverage_checker is not None:
@@ -132,7 +134,7 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
     selected_folds = [folds[-1]] if smoke else folds
     selected_seeds = (0,) if smoke else SEEDS
     root = pathlib.Path(output_root)
-    run_id = "smoke" if smoke else uuid.uuid4().hex
+    run_id = "smoke" if smoke else (run_id or uuid.uuid4().hex)
     run_root = root / "smoke" if smoke else root / run_id
     validation_root = run_root / "validation"
     test_root = run_root / "test"
@@ -244,7 +246,10 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
     _write(run_root / "gates.json", gate_report)
     if not smoke:
         method = method_by_fold.get(str(selected_folds[0].fold), {})
-        write_approval(run_root, method, gate_report, run_id, "")
+        write_approval(
+            run_root, method, gate_report, run_id, "", run_mode="full",
+            fold_count=len(selected_folds), seed_count=len(selected_seeds),
+        )
     summary["research_summary"] = research_summary
     summary["gates"] = gate_report
     summary["publishable"] = bool(not smoke and gate_report["research_ok"])
@@ -332,6 +337,8 @@ def main() -> int:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--output-root", default="artifacts/walk_forward")
+    parser.add_argument("--run-id", default=None,
+                        help="explicit full-run directory name for pipeline integration")
     parser.add_argument("--timesteps", type=int, default=None)
     args = parser.parse_args()
     if args.smoke and args.full:
@@ -352,6 +359,7 @@ def main() -> int:
         smoke=args.smoke, trainer=_default_trainer, tester=_default_tester,
         features_df=features, index_df=market_state, cfg=get_config(),
         timesteps=args.timesteps or (128 if args.smoke else 100_000),
+        run_id=args.run_id,
     )
     return 0
 

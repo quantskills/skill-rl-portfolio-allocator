@@ -177,3 +177,28 @@ def test_full_runs_use_unique_run_directories_and_write_frozen_test_records(tmp_
     for run_id in (first["run_id"], second["run_id"]):
         test_files = list((tmp_path / run_id / "test").rglob("*.json"))
         assert len(test_files) == 15
+
+
+def test_full_run_accepts_explicit_run_id_and_writes_full_approval(tmp_path):
+    def trainer(**kwargs):
+        return {"val_sharpe": 1.0, "checkpoint_path": "/tmp/fake.zip"}
+
+    def tester(**kwargs):
+        return {
+            "test_sharpe": 1.0, "oos_sharpe": 1.0, "oos_arr": 0.2,
+            "oos_mdd": -0.1, "excess_return": 0.2,
+            "strongest_baseline_sharpe": 0.1, "strongest_baseline_mdd": -0.2,
+            "annualized_turnover": 1.0, "cost_2x_oos_sharpe": 0.5,
+            "no_leakage_tests_passed": True, "state_quality_tests_passed": True,
+        }
+
+    result = run_walk_forward(
+        folds=default_folds(), output_root=tmp_path, smoke=False,
+        run_id="full-run-001", trainer=trainer, tester=tester,
+        coverage_checker=lambda: None, cfg={"schema_version": "state-v1"},
+    )
+    assert result["run_id"] == "full-run-001"
+    approval = json.loads((tmp_path / "full-run-001" / "approval.json").read_text())
+    assert approval["run_mode"] == "full"
+    assert approval["fold_count"] == 3
+    assert approval["seed_count"] == 5

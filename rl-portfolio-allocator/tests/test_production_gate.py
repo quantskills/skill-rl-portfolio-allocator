@@ -17,6 +17,9 @@ def _write_approval(root, *, research_ok=True, method=None, gates_ok=True):
     )
     approval = {
         "research_ok": research_ok,
+        "run_mode": "full",
+        "fold_count": 3,
+        "seed_count": 5,
         "schema_version": method["schema_version"],
         "method_id": __import__("scripts.walk_forward", fromlist=["frozen_method_id"])
         .frozen_method_id(method),
@@ -36,6 +39,24 @@ def test_load_research_approval_rejects_missing_file(tmp_path):
 def test_load_research_approval_rejects_failed_gate(tmp_path):
     path = _write_approval(tmp_path, research_ok=False)
     with pytest.raises(RuntimeError, match="research_ok"):
+        load_research_approval(path)
+
+
+def test_load_research_approval_rejects_smoke_run(tmp_path):
+    path = _write_approval(tmp_path)
+    data = json.loads(path.read_text())
+    data["run_mode"] = "smoke"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="full walk-forward"):
+        load_research_approval(path)
+
+
+def test_load_research_approval_rejects_incomplete_full_metadata(tmp_path):
+    path = _write_approval(tmp_path)
+    data = json.loads(path.read_text())
+    data.pop("fold_count")
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing fields|full-run metadata"):
         load_research_approval(path)
 
 

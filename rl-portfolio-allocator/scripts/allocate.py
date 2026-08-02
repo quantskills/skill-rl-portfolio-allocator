@@ -2,6 +2,7 @@
 落盘持仓表到 rl-portfolio-allocator-production/data/allocations.parquet。"""
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import shutil
 import pathlib
@@ -30,10 +31,16 @@ def load_research_approval(path) -> dict:
         raise RuntimeError("research_ok gate did not pass")
     if data.get("run_mode") == "smoke":
         raise RuntimeError("approval must come from a full walk-forward run")
-    required = {"schema_version", "method_id", "method_path", "gates_path"}
+    required = {
+        "schema_version", "method_id", "method_path", "gates_path",
+        "run_mode", "fold_count", "seed_count",
+    }
     missing = required - set(data)
     if missing:
         raise ValueError(f"approval missing fields: {sorted(missing)}")
+    if (data["run_mode"] != "full" or data["fold_count"] < 3
+            or data["seed_count"] < 5):
+        raise ValueError("approval missing complete full-run metadata")
     method_path = approval_path.parent / data["method_path"]
     gates_path = approval_path.parent / data["gates_path"]
     if not method_path.exists() or not gates_path.exists():
@@ -47,6 +54,14 @@ def load_research_approval(path) -> dict:
     if gates.get("research_ok") is not True:
         raise RuntimeError("approved gates did not pass")
     return data
+
+
+def load_approved_method(path) -> tuple[dict, dict]:
+    """Return the validated approval and its frozen method configuration."""
+    approval = load_research_approval(path)
+    approval_path = pathlib.Path(path)
+    method_path = approval_path.parent / approval["method_path"]
+    return approval, json.loads(method_path.read_text(encoding="utf-8"))
 
 
 def copy_approval_bundle(approval_path, candidate_dir) -> None:
@@ -85,11 +100,25 @@ def atomic_publish(candidate_dir, production_dir) -> None:
     if checkpoint.stat().st_size == 0:
         raise ValueError("candidate checkpoint is empty")
     metadata = candidate / "checkpoint_metadata.json"
-    if metadata.exists():
-        checkpoint_meta = json.loads(metadata.read_text(encoding="utf-8"))
-        approval_data = json.loads(approval.read_text(encoding="utf-8"))
-        if checkpoint_meta.get("schema_version") != approval_data["schema_version"]:
-            raise ValueError("candidate checkpoint metadata schema mismatch")
+    if not metadata.exists():
+        raise FileNotFoundError("candidate checkpoint metadata missing")
+    checkpoint_meta = json.loads(metadata.read_text(encoding="utf-8"))
+    approval_data = json.loads(approval.read_text(encoding="utf-8"))
+    scaler_data = json.loads(scaler.read_text(encoding="utf-8"))
+    expected_fields = tuple(state_fields(FACTOR_NAMES))
+    if (scaler_data.get("schema_version") != STATE_SCHEMA_VERSION
+            or tuple(scaler_data.get("fields", ())) != expected_fields
+            or len(scaler_data.get("mean", ())) != len(expected_fields)
+            or len(scaler_data.get("scale", ())) != len(expected_fields)):
+        raise ValueError("candidate scaler schema or fields mismatch")
+    if checkpoint_meta.get("schema_version") != approval_data["schema_version"]:
+        raise ValueError("candidate checkpoint metadata schema mismatch")
+    if checkpoint_meta.get("method_id") != approval_data["method_id"]:
+        raise ValueError("candidate checkpoint method mismatch")
+    if checkpoint_meta.get("checkpoint_id") != _file_id(checkpoint):
+        raise ValueError("candidate checkpoint hash mismatch")
+    if checkpoint_meta.get("scaler_id") != _file_id(scaler):
+        raise ValueError("candidate scaler hash mismatch")
     ok, errors = run_all(str(allocations), get_config())
     if not ok:
         raise ValueError("candidate allocations failed validation: " + "; ".join(errors))
@@ -98,8 +127,11 @@ def atomic_publish(candidate_dir, production_dir) -> None:
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir()
-    for name in ("allocations.parquet", "checkpoint.zip", "scaler.json", "approval.json"):
+    publish_files = ("allocations.parquet", "checkpoint.zip", "scaler.json", "approval.json")
+    for name in publish_files:
         shutil.copy2(candidate / name, staging / name)
+    if metadata.exists():
+        shutil.copy2(metadata, staging / metadata.name)
     # Publish a complete staged bundle. The pointer is replaced only after every
     # artifact has been copied and validated, so readers never observe a partial
     # candidate bundle through CURRENT.
@@ -133,6 +165,14 @@ def fit_production_scaler(env, seed: int) -> ObservationScaler:
     )
 
 
+def _file_id(path) -> str:
+    digest = hashlib.sha256()
+    with pathlib.Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
 def load_production_scaler(path) -> ObservationScaler:
     return ObservationScaler.load(
         path,
@@ -144,7 +184,8 @@ def load_production_scaler(path) -> ObservationScaler:
 def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
                         seed: int, checkpoint_path: str,
                         market_state_df: pd.DataFrame, scaler_path: str | None = None,
-                        metadata_path: str | None = None) -> str:
+                        metadata_path: str | None = None,
+                        method_id: str | None = None) -> str:
     dates = pd.to_datetime(features_df["trade_date"])
     start, end = effective_range(features_df, market_state_df, dates.min(), dates.max())
     print(f"effective range: {start.date()} ~ {end.date()}")
@@ -157,13 +198,18 @@ def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
     train_ppo(env, total_timesteps=timesteps, seed=seed, device=device, save_path=checkpoint_path)
     metadata_target = pathlib.Path(metadata_path) if metadata_path else pathlib.Path(checkpoint_path).with_name("checkpoint_metadata.json")
     metadata_target.parent.mkdir(parents=True, exist_ok=True)
-    metadata_target.write_text(json.dumps({
+    metadata = {
         "schema_version": STATE_SCHEMA_VERSION,
         "scaler_path": str(scaler_target),
         "train_range": {"start": str(start), "end": str(end)},
         "seed": seed,
         "timesteps": timesteps,
-    }, indent=2, sort_keys=True), encoding="utf-8")
+        "checkpoint_id": _file_id(checkpoint_path),
+        "scaler_id": _file_id(scaler_target),
+    }
+    if method_id is not None:
+        metadata["method_id"] = method_id
+    metadata_target.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     return checkpoint_path
 
 
@@ -282,11 +328,11 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    load_research_approval(args.approval)
+    approved, approved_method = load_approved_method(args.approval)
 
     candidate = pathlib.Path(args.candidate_dir) if args.candidate_dir else None
-    if args.retrain and candidate is None:
-        raise SystemExit("--retrain requires --candidate-dir; formal production paths are never written")
+    if candidate is None:
+        raise SystemExit("production execution requires --candidate-dir; formal paths are never written")
     if candidate is not None:
         candidate.mkdir(parents=True, exist_ok=True)
         ckpt = candidate / "checkpoint.zip"
@@ -302,12 +348,20 @@ def main() -> None:
 
     feats = pd.read_parquet(feats_path)
     market_state = pd.read_parquet(market_state_path)
+    cfg.update({
+        key: approved_method[key]
+        for key in ("reward_variant", "buffer_variant")
+        if key in approved_method
+    })
+    if approved_method.get("buffer_config"):
+        cfg.update(approved_method["buffer_config"])
     if args.retrain:
         retrain_production(
             feats, cfg, args.timesteps, seed=0,
             checkpoint_path=str(ckpt), market_state_df=market_state,
             scaler_path=str(scaler_path) if scaler_path else None,
             metadata_path=str(metadata_path) if metadata_path else None,
+            method_id=approved["method_id"],
         )
         print(f"candidate checkpoint saved: {ckpt}" if candidate else f"production checkpoint saved: {ckpt}")
     if not ckpt.exists():

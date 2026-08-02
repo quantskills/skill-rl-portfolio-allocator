@@ -16,6 +16,9 @@ def test_candidate_approval_bundle_preserves_referenced_paths(tmp_path):
     (source / "gates.json").write_text(json.dumps({"research_ok": True}), encoding="utf-8")
     approval = {
         "research_ok": True,
+        "run_mode": "full",
+        "fold_count": 3,
+        "seed_count": 5,
         "schema_version": "state-v1",
         "method_id": allocate.frozen_method_id(method),
         "method_path": "method.json",
@@ -45,13 +48,19 @@ def test_retrain_candidate_routes_all_artifacts_away_from_production(
     (tmp_path / "gates.json").write_text(json.dumps({"research_ok": True}), encoding="utf-8")
     approval.write_text(json.dumps({
         "research_ok": True,
+        "run_mode": "full",
+        "fold_count": 3,
+        "seed_count": 5,
         "schema_version": "state-v1",
         "method_id": allocate.frozen_method_id(method),
         "method_path": "method.json",
         "gates_path": "gates.json",
     }), encoding="utf-8")
 
-    monkeypatch.setattr(allocate, "load_research_approval", lambda path: {})
+    monkeypatch.setattr(
+        allocate, "load_approved_method",
+        lambda path: (json.loads(approval.read_text()), method),
+    )
     monkeypatch.setattr(
         allocate.pd,
         "read_parquet",
