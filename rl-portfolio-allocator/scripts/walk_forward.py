@@ -301,19 +301,29 @@ def _default_tester(**kwargs) -> dict:
     model = load_ppo(str(checkpoint_path), env)
     obs, _ = env.reset(seed=kwargs["seed"])
     returns = []
+    gross_returns = []
+    turnovers = []
     done = False
     while not done:
         action, _ = model.predict(obs, deterministic=True)
         obs, _, terminated, truncated, info = env.step(action)
         returns.extend(info["daily_net_rets"])
+        gross_returns.extend(info.get("daily_gross_rets", ()))
+        turnovers.append(float(info.get("turnover", 0.0)))
         done = terminated or truncated
     metrics = metrics_pack(returns, "test")
+    gross = list(gross_returns)
+    net = list(returns)
+    doubled_cost_returns = [2.0 * n - g for n, g in zip(net, gross)]
+    cost_2x = metrics_pack(doubled_cost_returns, "test_cost_2x")
     return {
         "test_sharpe": metrics["sharpe"],
         "oos_sharpe": metrics["sharpe"],
         "oos_arr": metrics["arr"],
         "oos_mdd": metrics["mdd"],
         "daily_returns": returns,
+        "annualized_turnover": (sum(turnovers) / max(len(turnovers), 1)) * 252.0,
+        "cost_2x_oos_sharpe": cost_2x["sharpe"],
     }
 
 

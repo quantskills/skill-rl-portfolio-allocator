@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import json
+import shutil
 import pathlib
 from datetime import datetime, timezone
 
@@ -15,6 +16,7 @@ from scripts.config import (
 from scripts.env import PortfolioEnv, effective_range
 from scripts.train import train_ppo, load_ppo, select_device
 from scripts.walk_forward import frozen_method_id
+from scripts.validate import run_all
 
 
 def load_research_approval(path) -> dict:
@@ -33,6 +35,8 @@ def load_research_approval(path) -> dict:
     if not method_path.exists() or not gates_path.exists():
         raise FileNotFoundError("approval references missing method or gates")
     method = json.loads(method_path.read_text(encoding="utf-8"))
+    if data["schema_version"] != method.get("schema_version"):
+        raise RuntimeError("approval and method schema mismatch")
     if frozen_method_id(method) != data["method_id"]:
         raise RuntimeError("approved method hash mismatch")
     gates = json.loads(gates_path.read_text(encoding="utf-8"))
@@ -49,20 +53,34 @@ def atomic_publish(candidate_dir, production_dir) -> None:
         raise FileNotFoundError("candidate approval missing")
     scaler = candidate / "scaler.json"
     checkpoint = candidate / "checkpoint.zip"
-    if not scaler.exists() or not checkpoint.exists():
-        raise FileNotFoundError("candidate scaler or checkpoint missing")
-    data = json.loads(approval.read_text(encoding="utf-8"))
-    if data.get("research_ok") is not True:
-        raise RuntimeError("candidate research gate did not pass")
+    allocations = candidate / "allocations.parquet"
+    if not scaler.exists() or not checkpoint.exists() or not allocations.exists():
+        raise FileNotFoundError("candidate allocations, scaler, or checkpoint missing")
+    load_research_approval(approval)
     if json.loads(scaler.read_text(encoding="utf-8")).get("schema_version") != "state-v1":
         raise ValueError("candidate scaler schema mismatch")
     if checkpoint.stat().st_size == 0:
         raise ValueError("candidate checkpoint is empty")
-    production.mkdir(parents=True, exist_ok=True)
+    ok, errors = run_all(str(allocations), get_config())
+    if not ok:
+        raise ValueError("candidate allocations failed validation: " + "; ".join(errors))
+    production.parent.mkdir(parents=True, exist_ok=True)
+    staging = production.parent / (production.name + ".staging")
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir()
     for name in ("allocations.parquet", "checkpoint.zip", "scaler.json", "approval.json"):
-        source = candidate / name
-        if source.exists():
-            source.replace(production / name)
+        shutil.copy2(candidate / name, staging / name)
+    # Publish a complete staged bundle. The pointer is replaced only after every
+    # artifact has been copied and validated, so readers never observe a partial
+    # candidate bundle through CURRENT.
+    pointer = production.parent / (production.name + ".CURRENT")
+    pointer_tmp = production.parent / (production.name + ".CURRENT.tmp")
+    pointer_tmp.write_text(production.name, encoding="utf-8")
+    pointer_tmp.replace(pointer)
+    if production.exists():
+        shutil.rmtree(production)
+    staging.replace(production)
 
 
 def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
@@ -181,7 +199,11 @@ def main() -> None:
     grp.add_argument("--retrain", action="store_true", help="用数据起点~最新日全部数据重训生产模型")
     grp.add_argument("--infer-only", action="store_true", help="复用现有生产模型仅推理当日持仓")
     p.add_argument("--timesteps", type=int, default=200_000)
+    p.add_argument("--approval", required=True,
+                   help="research approval.json; production execution fails closed without it")
     args = p.parse_args()
+
+    load_research_approval(args.approval)
 
     feats = pd.read_parquet(feats_path)
     market_state = pd.read_parquet(market_state_path)
