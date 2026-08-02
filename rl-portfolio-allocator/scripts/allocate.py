@@ -14,6 +14,55 @@ from scripts.config import (
 )
 from scripts.env import PortfolioEnv, effective_range
 from scripts.train import train_ppo, load_ppo, select_device
+from scripts.walk_forward import frozen_method_id
+
+
+def load_research_approval(path) -> dict:
+    approval_path = pathlib.Path(path)
+    if not approval_path.exists():
+        raise FileNotFoundError(f"research approval missing: {approval_path}")
+    data = json.loads(approval_path.read_text(encoding="utf-8"))
+    if data.get("research_ok") is not True:
+        raise RuntimeError("research_ok gate did not pass")
+    required = {"schema_version", "method_id", "method_path", "gates_path"}
+    missing = required - set(data)
+    if missing:
+        raise ValueError(f"approval missing fields: {sorted(missing)}")
+    method_path = approval_path.parent / data["method_path"]
+    gates_path = approval_path.parent / data["gates_path"]
+    if not method_path.exists() or not gates_path.exists():
+        raise FileNotFoundError("approval references missing method or gates")
+    method = json.loads(method_path.read_text(encoding="utf-8"))
+    if frozen_method_id(method) != data["method_id"]:
+        raise RuntimeError("approved method hash mismatch")
+    gates = json.loads(gates_path.read_text(encoding="utf-8"))
+    if gates.get("research_ok") is not True:
+        raise RuntimeError("approved gates did not pass")
+    return data
+
+
+def atomic_publish(candidate_dir, production_dir) -> None:
+    candidate = pathlib.Path(candidate_dir)
+    production = pathlib.Path(production_dir)
+    approval = candidate / "approval.json"
+    if not approval.exists():
+        raise FileNotFoundError("candidate approval missing")
+    scaler = candidate / "scaler.json"
+    checkpoint = candidate / "checkpoint.zip"
+    if not scaler.exists() or not checkpoint.exists():
+        raise FileNotFoundError("candidate scaler or checkpoint missing")
+    data = json.loads(approval.read_text(encoding="utf-8"))
+    if data.get("research_ok") is not True:
+        raise RuntimeError("candidate research gate did not pass")
+    if json.loads(scaler.read_text(encoding="utf-8")).get("schema_version") != "state-v1":
+        raise ValueError("candidate scaler schema mismatch")
+    if checkpoint.stat().st_size == 0:
+        raise ValueError("candidate checkpoint is empty")
+    production.mkdir(parents=True, exist_ok=True)
+    for name in ("allocations.parquet", "checkpoint.zip", "scaler.json", "approval.json"):
+        source = candidate / name
+        if source.exists():
+            source.replace(production / name)
 
 
 def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
