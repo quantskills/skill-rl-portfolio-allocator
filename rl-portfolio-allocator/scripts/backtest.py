@@ -21,12 +21,11 @@ def run_ppo_rollout(model, env) -> tuple[np.ndarray, list, list]:
     obs, _ = env.reset(seed=0)
     infos, rets, dates, done = [], [], [], False
     while not done:
-        signal_date = env.decision_dates[env.t]
         act, _ = model.predict(obs, deterministic=True)
         obs, _, term, trunc, info = env.step(act)
         infos.append(info)
-        rets.extend(info.get("daily_net_rets", [info["net_ret"]]))
-        dates.extend(info.get("settlement_dates", [signal_date]))
+        rets.extend(info["daily_net_rets"])
+        dates.extend(info["settlement_dates"])
         done = term or trunc
     return np.asarray(rets), infos, dates
 

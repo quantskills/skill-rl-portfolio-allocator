@@ -37,3 +37,26 @@ def test_delta_transform_applies_ema_after_target_normalization():
 def test_delta_transform_rejects_nonfinite_inputs():
     with np.testing.assert_raises(ValueError):
         transform_delta_action(np.array([np.nan]), np.array([1.0]), 0.2, 0.5)
+
+
+def test_max_delta_zero_keeps_previous_and_positive_limit_clips_raw_tanh_delta():
+    previous = np.array([0.75, -0.25])
+    np.testing.assert_array_equal(
+        transform_delta_action(np.array([100.0, -100.0]), previous, 0.0, 1.0),
+        previous,
+    )
+
+    raw = np.array([100.0, -100.0])
+    max_delta = 0.2
+    target = previous + np.clip(np.tanh(raw), -max_delta, max_delta)
+    target /= np.abs(target).sum()
+    np.testing.assert_allclose(
+        transform_delta_action(raw, previous, max_delta, 1.0), target, atol=1e-12
+    )
+
+
+def test_max_delta_must_be_finite_and_nonnegative():
+    previous = np.array([1.0])
+    for bad in (-1.0, np.nan, np.inf):
+        with np.testing.assert_raises(ValueError):
+            transform_delta_action(np.array([0.1]), previous, bad, 1.0)

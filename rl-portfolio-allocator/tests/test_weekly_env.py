@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from scripts.config import FACTOR_NAMES, K, get_config
 from scripts.env import PortfolioEnv, extract_settle_holding_period
@@ -18,6 +19,12 @@ def _toy_data(periods=15):
     features = pd.DataFrame(rows)
     state = pd.DataFrame(0.1, index=dates, columns=exogenous_fields(FACTOR_NAMES))
     return features, state
+
+
+def test_env_rejects_data_without_a_settleable_period():
+    features, state = _toy_data(periods=1)
+    with pytest.raises(ValueError, match="at least two all_dates"):
+        PortfolioEnv(features, state, get_config(), features.trade_date.min(), features.trade_date.max())
 
 
 def test_weekly_env_exposes_decision_dates_and_compounds_each_settlement_day():
@@ -70,3 +77,24 @@ def test_settlement_helper_charges_trade_cost_once_and_borrow_daily():
     assert result["costs"]["borrow"] == 3 * 0.001
     assert result["costs"]["total"] == result["costs"]["commission"] + result["costs"]["borrow"]
     assert len(result["daily_net_rets"]) == 3
+
+
+def test_rollout_requires_weekly_daily_settlement_fields():
+    from scripts.backtest import run_ppo_rollout
+
+    class Model:
+        def predict(self, obs, deterministic):
+            return np.zeros(K), None
+
+    class Env:
+        decision_dates = [pd.Timestamp("2024-01-01")]
+        t = 0
+
+        def reset(self, seed):
+            return np.zeros(1), {}
+
+        def step(self, action):
+            return np.zeros(1), 0.0, True, False, {"net_ret": 0.1}
+
+    with pytest.raises(KeyError):
+        run_ppo_rollout(Model(), Env())

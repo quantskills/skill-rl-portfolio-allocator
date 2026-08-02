@@ -117,6 +117,10 @@ class PortfolioEnv(gym.Env):
         self.dates = self.all_dates
         self.decision_indices = weekly_decision_indices(self.all_dates)
         self.decision_dates = [self.all_dates[i] for i in self.decision_indices]
+        if len(self.all_dates) < 2 or not any(
+            index < len(self.all_dates) - 1 for index in self.decision_indices
+        ):
+            raise ValueError("PortfolioEnv requires at least two all_dates and one settleable period")
         self.symbols = sorted(df["symbol"].unique())
         self._sym_to_idx = {s: i for i, s in enumerate(self.symbols)}
         self.n = len(self.symbols)
