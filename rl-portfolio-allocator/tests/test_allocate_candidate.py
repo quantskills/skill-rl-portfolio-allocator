@@ -7,6 +7,32 @@ import numpy as np
 import scripts.allocate as allocate
 
 
+def test_candidate_approval_bundle_preserves_referenced_paths(tmp_path):
+    source = tmp_path / "research"
+    candidate = tmp_path / "candidate"
+    source.mkdir()
+    method = {"schema_version": "state-v1", "method": "ppo"}
+    (source / "method.json").write_text(json.dumps(method), encoding="utf-8")
+    (source / "gates.json").write_text(json.dumps({"research_ok": True}), encoding="utf-8")
+    approval = {
+        "research_ok": True,
+        "schema_version": "state-v1",
+        "method_id": allocate.frozen_method_id(method),
+        "method_path": "method.json",
+        "gates_path": "gates.json",
+    }
+    approval_path = source / "approval.json"
+    approval_path.write_text(json.dumps(approval), encoding="utf-8")
+
+    allocate.copy_approval_bundle(approval_path, candidate)
+
+    assert allocate.load_research_approval(candidate / "approval.json") == approval
+    assert (candidate / "method.json").read_text(encoding="utf-8") == (
+        source / "method.json"
+    ).read_text(encoding="utf-8")
+    assert (candidate / "gates.json").exists()
+
+
 def test_retrain_candidate_routes_all_artifacts_away_from_production(
     tmp_path, monkeypatch
 ):
@@ -14,7 +40,16 @@ def test_retrain_candidate_routes_all_artifacts_away_from_production(
     formal_checkpoint = tmp_path / "checkpoints" / "production.zip"
     formal_allocations = tmp_path / "production" / "allocations.parquet"
     approval = tmp_path / "approval.json"
-    approval.write_text(json.dumps({"research_ok": True}), encoding="utf-8")
+    method = {"schema_version": "state-v1", "method": "ppo"}
+    (tmp_path / "method.json").write_text(json.dumps(method), encoding="utf-8")
+    (tmp_path / "gates.json").write_text(json.dumps({"research_ok": True}), encoding="utf-8")
+    approval.write_text(json.dumps({
+        "research_ok": True,
+        "schema_version": "state-v1",
+        "method_id": allocate.frozen_method_id(method),
+        "method_path": "method.json",
+        "gates_path": "gates.json",
+    }), encoding="utf-8")
 
     monkeypatch.setattr(allocate, "load_research_approval", lambda path: {})
     monkeypatch.setattr(

@@ -49,6 +49,25 @@ def load_research_approval(path) -> dict:
     return data
 
 
+def copy_approval_bundle(approval_path, candidate_dir) -> None:
+    """Copy approval and its relative method/gate references into a candidate."""
+    source_approval = pathlib.Path(approval_path)
+    candidate = pathlib.Path(candidate_dir)
+    data = json.loads(source_approval.read_text(encoding="utf-8"))
+    candidate.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_approval, candidate / "approval.json")
+    for field in ("method_path", "gates_path"):
+        reference = pathlib.Path(data[field])
+        if reference.is_absolute() or ".." in reference.parts:
+            raise ValueError(f"approval {field} must be a relative candidate path")
+        source = source_approval.parent / reference
+        if not source.exists():
+            raise FileNotFoundError(f"approval references missing {field}: {source}")
+        target = candidate / reference
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
 def atomic_publish(candidate_dir, production_dir) -> None:
     candidate = pathlib.Path(candidate_dir)
     production = pathlib.Path(production_dir)
@@ -274,7 +293,7 @@ def main() -> None:
         scaler_path = candidate / "scaler.json"
         metadata_path = candidate / "checkpoint_metadata.json"
         out_path = candidate / "allocations.parquet"
-        shutil.copy2(args.approval, candidate / "approval.json")
+        copy_approval_bundle(args.approval, candidate)
     else:
         ckpt = formal_ckpt
         scaler_path = None
