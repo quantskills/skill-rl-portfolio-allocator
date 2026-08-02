@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
 import sys
@@ -14,6 +15,30 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from scripts.check_data_coverage import Fold, check_folds, default_folds
+
+
+def frozen_method_id(method: dict) -> str:
+    payload = json.dumps(method, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def write_approval(run_root: pathlib.Path, method: dict, gate_report: dict,
+                   run_id: str, created_at: str):
+    if gate_report.get("research_ok") is not True:
+        return None
+    run_root.mkdir(parents=True, exist_ok=True)
+    method_path = run_root / "method.json"
+    gates_path = run_root / "gates.json"
+    method_path.write_text(json.dumps(_jsonable(method), indent=2, sort_keys=True), encoding="utf-8")
+    gates_path.write_text(json.dumps(_jsonable(gate_report), indent=2, sort_keys=True), encoding="utf-8")
+    approval = {
+        "research_ok": True, "schema_version": method.get("schema_version", "state-v1"),
+        "method_id": frozen_method_id(method), "method_path": "method.json",
+        "gates_path": "gates.json", "run_id": run_id, "created_at": created_at,
+    }
+    path = run_root / "approval.json"
+    path.write_text(json.dumps(approval, indent=2, sort_keys=True), encoding="utf-8")
+    return path
 
 
 SEEDS = (0, 1, 2, 3, 4)
