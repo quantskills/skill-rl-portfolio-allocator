@@ -5,7 +5,42 @@ import pandas as pd
 
 from scripts.config import FACTOR_NAMES, K
 from scripts.costs import total_costs
-from scripts.portfolio import composite_score, select_long_short, target_weights, freeze_suspended
+from scripts.portfolio import composite_score, target_weights, freeze_suspended
+from scripts.rebalance import buffered_long_short, project_turnover, weekly_decision_indices
+from scripts.env import extract_settle_holding_period
+
+
+def _l1_normalize(values: np.ndarray, *, zero_error: bool) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.shape != (K,) or not np.isfinite(values).all():
+        raise ValueError("factor weights must be finite and have one entry per factor")
+    norm = float(np.abs(values).sum())
+    if norm == 0.0:
+        if zero_error:
+            raise ValueError("factor weights are all zero")
+        return np.zeros(K)
+    return values / norm
+
+
+def fit_static_factor_weights(factor_returns: pd.DataFrame) -> np.ndarray:
+    """Fit frozen factor weights using only complete training observations."""
+    sample = factor_returns.loc[:, FACTOR_NAMES].replace([np.inf, -np.inf], np.nan).dropna()
+    if len(sample) < 60:
+        raise ValueError("at least 60 complete factor-return observations are required")
+    values = sample.to_numpy(dtype=float)
+    mean = values.mean(axis=0)
+    covariance = np.cov(values, rowvar=False, ddof=1)
+    ridge = 1e-6 * max(float(np.trace(covariance)) / K, 1.0)
+    weights = np.linalg.pinv(covariance + ridge * np.eye(K)) @ mean
+    return _l1_normalize(weights, zero_error=True)
+
+
+def rolling_ic_weights(state_row: pd.Series) -> np.ndarray:
+    """Convert the current causal state row's trailing IC means to L1 weights."""
+    values = np.asarray(
+        [state_row[f"{factor}_ic_mean_20"] for factor in FACTOR_NAMES], dtype=float
+    )
+    return _l1_normalize(values, zero_error=False)
 
 
 def _iter_dates(features_df, start, end):
@@ -38,6 +73,43 @@ def _step_returns(prev_w, target_w, ret_next, cfg):
     return gross - costs["total"]
 
 
+def _weekly_factor_rollout(features_df, cfg, start, end, weight_for_date, short_enabled=True):
+    df, dates = _iter_dates(features_df, start, end)
+    symbols, n, F_by, ret_by, susp_by = _panel(df)
+    decision_indices = weekly_decision_indices(dates)
+    prev = np.zeros(n)
+    out = []
+    for position, index in enumerate(decision_indices[:-1]):
+        d = dates[index]
+        next_index = decision_indices[position + 1]
+        F = F_by[d]
+        susp = susp_by[d]
+        factor_w = weight_for_date(d)
+        scores = composite_score(F, factor_w)
+        long_idx, short_idx = buffered_long_short(
+            scores, susp, prev,
+            cfg["top_n"], cfg.get("long_exit", cfg["top_n"]),
+            cfg["bottom_m"] if short_enabled else 0,
+            cfg.get("short_exit", cfg["bottom_m"]) if short_enabled else 0,
+        )
+        target = target_weights(
+            scores, long_idx, short_idx,
+            cfg["long_notional"], cfg["short_notional_cap"] if short_enabled else 0.0,
+        )
+        target = freeze_suspended(target, prev, susp)
+        target = project_turnover(
+            prev, target, susp, cfg["turnover_budget"],
+            cfg["long_notional"], cfg["short_notional_cap"],
+        )
+        settlement_dates = dates[index + 1 : next_index + 1]
+        settled = extract_settle_holding_period(
+            prev, target, settlement_dates, ret_by, cfg,
+        )
+        out.extend(settled["daily_net_rets"])
+        prev = target
+    return np.asarray(out)
+
+
 def equal_weight_rollout(features_df, cfg, start, end) -> np.ndarray:
     df, dates = _iter_dates(features_df, start, end)
     symbols, n, F_by, ret_by, susp_by = _panel(df)
@@ -57,35 +129,36 @@ def equal_weight_rollout(features_df, cfg, start, end) -> np.ndarray:
 
 
 def long_only_topn_rollout(features_df, cfg, start, end, static_factor_w: np.ndarray) -> np.ndarray:
-    df, dates = _iter_dates(features_df, start, end)
-    symbols, n, F_by, ret_by, susp_by = _panel(df)
-    prev = np.zeros(n)
-    out = []
-    for i in range(len(dates) - 1):
-        F = F_by[dates[i]]; susp = susp_by[dates[i]]
-        scores = composite_score(F, static_factor_w)
-        long_idx, _ = select_long_short(scores, susp, cfg["top_n"], bottom_m=0)
-        w = target_weights(scores, long_idx, np.array([], dtype=int), cfg["long_notional"], 0.0)
-        w = freeze_suspended(w, prev, susp)
-        r_next = ret_by[dates[i + 1]]
-        out.append(_step_returns(prev, w, r_next, cfg))
-        prev = w
-    return np.asarray(out)
+    static_factor_w = _l1_normalize(static_factor_w, zero_error=True)
+    return _weekly_factor_rollout(
+        features_df, cfg, start, end, lambda _: static_factor_w, short_enabled=False
+    )
 
 
 def static_factor_equal_rollout(features_df, cfg, start, end) -> np.ndarray:
     static_w = np.ones(K) / K
-    df, dates = _iter_dates(features_df, start, end)
-    symbols, n, F_by, ret_by, susp_by = _panel(df)
-    prev = np.zeros(n)
-    out = []
-    for i in range(len(dates) - 1):
-        F = F_by[dates[i]]; susp = susp_by[dates[i]]
-        scores = composite_score(F, static_w)
-        long_idx, short_idx = select_long_short(scores, susp, cfg["top_n"], cfg["bottom_m"])
-        w = target_weights(scores, long_idx, short_idx, cfg["long_notional"], cfg["short_notional_cap"])
-        w = freeze_suspended(w, prev, susp)
-        r_next = ret_by[dates[i + 1]]
-        out.append(_step_returns(prev, w, r_next, cfg))
-        prev = w
-    return np.asarray(out)
+    return _weekly_factor_rollout(features_df, cfg, start, end, lambda _: static_w)
+
+
+def static_factor_optimized_rollout(
+    features_df, cfg, start, end, train_factor_returns: pd.DataFrame
+) -> np.ndarray:
+    static_w = fit_static_factor_weights(train_factor_returns)
+    return _weekly_factor_rollout(features_df, cfg, start, end, lambda _: static_w)
+
+
+def rolling_ic_rollout(features_df, market_state_df, cfg, start, end) -> np.ndarray:
+    state = market_state_df.copy()
+    if "trade_date" in state.columns:
+        state["trade_date"] = pd.to_datetime(state["trade_date"])
+        state = state.set_index("trade_date")
+    else:
+        state.index = pd.to_datetime(state.index)
+    state = state.sort_index()
+
+    def weight_for_date(date):
+        if date not in state.index:
+            raise ValueError(f"missing causal market state for decision date {date}")
+        return rolling_ic_weights(state.loc[date])
+
+    return _weekly_factor_rollout(features_df, cfg, start, end, weight_for_date)
