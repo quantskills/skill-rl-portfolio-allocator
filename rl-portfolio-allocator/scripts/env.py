@@ -187,7 +187,7 @@ class PortfolioEnv(gym.Env):
                 self.prev_factor_w, cash=max(0.0, 1.0 - long_notional - short_notional),
             )
         else:
-            obs = self._scale(np.zeros(state_dim(FACTOR_NAMES), dtype=np.float32))
+            obs = np.zeros(state_dim(FACTOR_NAMES), dtype=np.float32)
 
         info = {
             **costs,

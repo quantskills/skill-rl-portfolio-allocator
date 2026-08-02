@@ -51,6 +51,8 @@ def test_scaler_fit_transform_and_constant_columns():
 def test_scaler_fit_rejects_invalid_shape_or_values():
     with pytest.raises(ValueError):
         ObservationScaler.fit(np.ones(3), "v1", ("a",))
+    with pytest.raises(ValueError, match="empty"):
+        ObservationScaler.fit(np.empty((0, 1)), "v1", ("a",))
     with pytest.raises(ValueError):
         ObservationScaler.fit(np.ones((2, 2)), "v1", ("a",))
     with pytest.raises(ValueError):
@@ -107,3 +109,22 @@ def test_portfolio_env_scales_only_returned_observations():
     np.testing.assert_array_equal(obs, scaler.transform(raw))
     next_obs, *_ = env.step(np.zeros(env.action_space.shape, dtype=np.float32))
     assert next_obs.dtype == np.float32
+
+
+def test_portfolio_env_scales_terminal_observation_once():
+    dim = state_dim(FACTOR_NAMES)
+    scaler = ObservationScaler(
+        schema_version="v1", fields=tuple(f"f{i}" for i in range(dim)),
+        mean=tuple(2.0 for _ in range(dim)), scale=tuple(2.0 for _ in range(dim)),
+    )
+    env = _env(scaler)
+    action = np.zeros(env.action_space.shape, dtype=np.float32)
+
+    env.reset(seed=0)
+    for _ in range(len(env.dates) - 1):
+        obs, _, terminated, _, _ = env.step(action)
+        assert not terminated
+    terminal_obs, _, terminated, _, _ = env.step(action)
+
+    assert terminated
+    np.testing.assert_array_equal(terminal_obs, np.full(dim, -1.0, dtype=np.float32))

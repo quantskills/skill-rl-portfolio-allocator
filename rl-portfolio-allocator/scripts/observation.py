@@ -20,6 +20,8 @@ class ObservationScaler:
         arr = np.asarray(x, dtype=float)
         if arr.ndim != 2 or arr.shape[1] != len(fields):
             raise ValueError("observation matrix shape does not match fields")
+        if arr.shape[0] == 0:
+            raise ValueError("observation matrix must not be empty")
         if not np.isfinite(arr).all():
             raise ValueError("non-finite observation in scaler fit")
         mean = arr.mean(axis=0)
