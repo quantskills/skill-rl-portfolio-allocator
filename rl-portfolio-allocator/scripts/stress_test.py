@@ -13,11 +13,11 @@ if __package__ in (None, ""):
 
 from scripts.config import get_config
 from scripts.backtest import run_backtest
+from scripts.env import usable_market_state_dates
 from scripts.baselines import (
     equal_weight_rollout, long_only_topn_rollout, static_factor_equal_rollout
 )
 from scripts.metrics import metrics_pack
-from scripts.config import K
 
 
 STRESS_SEGMENTS = [
@@ -73,18 +73,28 @@ def apply_frozen_method(cfg: dict, method: dict, default_budget: int) -> tuple[d
     if buffer_config is None:
         raise ValueError("frozen method artifact must contain buffer_config")
     applied.update(buffer_config)
+    if "factor_names" in method:
+        names = list(method["factor_names"])
+        if not names:
+            raise ValueError("frozen factor_names must be non-empty")
+        applied["factor_names"] = names
+        applied["k"] = len(names)
     budget = int(method.get("training_budget", default_budget))
     if budget <= 0:
         raise ValueError("training_budget must be positive")
     return applied, budget
 
 
-def _has_enough(feats: pd.DataFrame, market_state: pd.DataFrame,
-                train_end: str, min_years: int) -> tuple[bool, str, str]:
+def _has_enough(
+    feats: pd.DataFrame,
+    market_state: pd.DataFrame,
+    train_end: str,
+    min_years: int,
+    factor_names=None,
+) -> tuple[bool, str, str]:
     d = pd.to_datetime(feats["trade_date"])
-    state_dates = (pd.to_datetime(market_state["trade_date"]) if "trade_date" in market_state
-                   else pd.to_datetime(market_state.index))
-    common = pd.DatetimeIndex(d.unique()).intersection(state_dates.unique())
+    state_dates = usable_market_state_dates(market_state, factor_names)
+    common = pd.DatetimeIndex(d.unique()).intersection(state_dates)
     if len(common) == 0:
         return False, "n/a", "no feature/market_state date intersection"
     data_start = common.min()
@@ -104,7 +114,8 @@ def _core_metrics(features_df: pd.DataFrame, cfg: dict,
     mask = np.array([core_s <= pd.Timestamp(d) <= core_e for d in rl_dates])
     rl_core = rl_daily_rets[mask] if mask.any() else np.asarray([])
     ew = equal_weight_rollout(features_df, cfg, core_start, core_end)
-    lo = long_only_topn_rollout(features_df, cfg, core_start, core_end, np.ones(K) / K)
+    k = len(tuple(cfg["factor_names"]))
+    lo = long_only_topn_rollout(features_df, cfg, core_start, core_end, np.ones(k) / k)
     sf = static_factor_equal_rollout(features_df, cfg, core_start, core_end)
     return {
         "rl": metrics_pack(rl_core, "rl_core"),
@@ -121,7 +132,11 @@ def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
     out = []
     for seg in STRESS_SEGMENTS:
         ok, data_start, reason = _has_enough(
-            features_df, market_state_df, seg["train_end"], seg["required_min_years"]
+            features_df,
+            market_state_df,
+            seg["train_end"],
+            seg["required_min_years"],
+            factor_names=cfg["factor_names"],
         )
         if not ok:
             out.append({"name": seg["name"], "skipped": True, "reason": reason})

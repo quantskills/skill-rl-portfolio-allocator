@@ -37,7 +37,7 @@ def test_fit_static_factor_weights_uses_training_columns_and_is_l1_normalized():
     values = np.arange(60 * K, dtype=float).reshape(60, K)
     factor_returns = pd.DataFrame(values, columns=FACTOR_NAMES)
 
-    weights = fit_static_factor_weights(factor_returns)
+    weights = fit_static_factor_weights(factor_returns, FACTOR_NAMES)
     factor_returns.iloc[:, 0] = -999.0
 
     assert weights.shape == (K,)
@@ -49,20 +49,20 @@ def test_fit_static_factor_weights_requires_60_complete_observations():
     factor_returns = pd.DataFrame(np.ones((59, K)), columns=FACTOR_NAMES)
 
     with pytest.raises(ValueError, match="60"):
-        fit_static_factor_weights(factor_returns)
+        fit_static_factor_weights(factor_returns, FACTOR_NAMES)
 
 
 def test_fit_static_factor_weights_rejects_zero_solution():
     factor_returns = pd.DataFrame(np.zeros((60, K)), columns=FACTOR_NAMES)
 
     with pytest.raises(ValueError, match="zero"):
-        fit_static_factor_weights(factor_returns)
+        fit_static_factor_weights(factor_returns, FACTOR_NAMES)
 
 
 def test_rolling_ic_weights_reads_current_state_and_is_l1_normalized():
     row = pd.Series({f"{factor}_ic_mean_20": i - 2 for i, factor in enumerate(FACTOR_NAMES)})
 
-    weights = rolling_ic_weights(row)
+    weights = rolling_ic_weights(row, FACTOR_NAMES)
 
     assert np.sum(np.abs(weights)) == pytest.approx(1.0)
     assert np.allclose(weights, np.asarray([-2, -1, 0, 1, 2, 3]) / 9.0)
@@ -71,7 +71,7 @@ def test_rolling_ic_weights_reads_current_state_and_is_l1_normalized():
 def test_rolling_ic_weights_returns_zero_for_zero_signal():
     row = pd.Series({f"{factor}_ic_mean_20": 0.0 for factor in FACTOR_NAMES})
 
-    assert np.array_equal(rolling_ic_weights(row), np.zeros(K))
+    assert np.array_equal(rolling_ic_weights(row, FACTOR_NAMES), np.zeros(K))
 
 
 def test_factor_rollout_settles_final_decision_period_for_17_dates():
@@ -81,6 +81,33 @@ def test_factor_rollout_settles_final_decision_period_for_17_dates():
     )
 
     assert len(result) == 16
+
+
+def test_equal_factor_baseline_dimension_matches_config():
+    names = list(FACTOR_NAMES[:3])
+    cfg = _baseline_cfg()
+    cfg["factor_names"] = names
+    cfg["k"] = len(names)
+    features = _features().drop(columns=[name for name in FACTOR_NAMES if name not in names])
+
+    result = static_factor_equal_rollout(
+        features, cfg, features.trade_date.min(), features.trade_date.max()
+    )
+
+    assert result.ndim == 1
+    assert len(result) == 16
+
+
+def test_static_weight_helpers_use_explicit_factor_names():
+    names = list(FACTOR_NAMES[:3])
+    returns = pd.DataFrame(np.arange(180, dtype=float).reshape(60, 3), columns=names)
+    row = pd.Series({f"{name}_ic_mean_20": i + 1.0 for i, name in enumerate(names)})
+
+    fitted = fit_static_factor_weights(returns, names)
+    rolling = rolling_ic_weights(row, names)
+
+    assert fitted.shape == (3,)
+    assert rolling.shape == (3,)
 
 
 def test_equal_weight_rollout_uses_weekly_settlement_length():

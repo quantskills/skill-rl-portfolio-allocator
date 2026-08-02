@@ -7,7 +7,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from scripts.config import get_config, FACTOR_NAMES, K
+from scripts.config import get_config
 from scripts.env import PortfolioEnv, effective_range
 from scripts.train import train_ppo, select_device
 from scripts.market_state import compute_daily_factor_returns
@@ -41,6 +41,8 @@ def run_backtest(
     save_path: Optional[str] = None,
     online_retrain_interval: Optional[int] = None,
 ) -> dict:
+    names = tuple(cfg["factor_names"])
+    k = len(names)
     train_env = PortfolioEnv(features_df, market_state_df, cfg, train_start, train_end)
     device = select_device(cfg["train_device"])
     model = train_ppo(train_env, total_timesteps=timesteps, seed=seed, device=device, save_path=save_path)
@@ -54,8 +56,8 @@ def run_backtest(
         (train_features["trade_date"] >= pd.Timestamp(train_start))
         & (train_features["trade_date"] <= pd.Timestamp(train_end))
     ]
-    train_factor_returns = compute_daily_factor_returns(train_features, cfg).rename(
-        columns={f"{factor}_factor_ret": factor for factor in FACTOR_NAMES}
+    train_factor_returns = compute_daily_factor_returns(train_features, cfg, names).rename(
+        columns={f"{factor}_factor_ret": factor for factor in names}
     )
 
     # Online retraining: if specified interval (e.g., 252 days = 1 year), retrain on rolling window
@@ -69,7 +71,7 @@ def run_backtest(
                 model = train_ppo(retrain_env, total_timesteps=timesteps // 2, seed=seed, device=device)  # Lighter retraining
 
     ew = equal_weight_rollout(features_df, cfg, test_start, test_end)
-    lo = long_only_topn_rollout(features_df, cfg, test_start, test_end, np.ones(K) / K)
+    lo = long_only_topn_rollout(features_df, cfg, test_start, test_end, np.ones(k) / k)
     sf = static_factor_equal_rollout(features_df, cfg, test_start, test_end)
     so = static_factor_optimized_rollout(
         features_df, cfg, test_start, test_end, train_factor_returns
