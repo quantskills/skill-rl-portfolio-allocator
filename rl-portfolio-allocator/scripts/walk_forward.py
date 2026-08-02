@@ -15,6 +15,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from scripts.check_data_coverage import Fold, check_folds, default_folds
+from scripts.research_gates import evaluate_research_gates
 
 
 def frozen_method_id(method: dict) -> str:
@@ -203,6 +204,28 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
     summary["method_by_fold"] = method_by_fold
     if smoke:
         summary["frozen_method"] = method_by_fold[str(selected_folds[0].fold)]
+    research_summary = {
+        "combined_oos_arr": next((r.get("combined_oos_arr") for r in test_rows if "combined_oos_arr" in r), None),
+        "median_seed_oos_sharpe": next((r.get("median_seed_oos_sharpe") for r in test_rows if "median_seed_oos_sharpe" in r), None),
+        "strongest_baseline_sharpe": next((r.get("strongest_baseline_sharpe") for r in test_rows if "strongest_baseline_sharpe" in r), None),
+        "positive_excess_return_folds": next((r.get("positive_excess_return_folds") for r in test_rows if "positive_excess_return_folds" in r), None),
+        "total_folds": len(selected_folds),
+        "median_seed_excess_return": next((r.get("median_seed_excess_return") for r in test_rows if "median_seed_excess_return" in r), None),
+        "oos_mdd": next((r.get("oos_mdd") for r in test_rows if "oos_mdd" in r), None),
+        "strongest_baseline_mdd": next((r.get("strongest_baseline_mdd") for r in test_rows if "strongest_baseline_mdd" in r), None),
+        "annualized_turnover": next((r.get("annualized_turnover") for r in test_rows if "annualized_turnover" in r), None),
+        "cost_2x_oos_sharpe": next((r.get("cost_2x_oos_sharpe") for r in test_rows if "cost_2x_oos_sharpe" in r), None),
+        "no_leakage_tests_passed": False if smoke else next((r.get("no_leakage_tests_passed") for r in test_rows if "no_leakage_tests_passed" in r), None),
+        "state_quality_tests_passed": False if smoke else next((r.get("state_quality_tests_passed") for r in test_rows if "state_quality_tests_passed" in r), None),
+    }
+    gate_report = evaluate_research_gates(research_summary)
+    _write(run_root / "research_summary.json", research_summary)
+    _write(run_root / "gates.json", gate_report)
+    if not smoke:
+        method = method_by_fold.get(str(selected_folds[0].fold), {})
+        write_approval(run_root, method, gate_report, run_id, "")
+    summary["research_summary"] = research_summary
+    summary["gates"] = gate_report
     _write(run_root / "summary.json", summary)
     return summary
 
