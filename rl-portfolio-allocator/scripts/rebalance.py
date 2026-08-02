@@ -8,8 +8,11 @@ def weekly_decision_indices(dates) -> np.ndarray:
     index = pd.DatetimeIndex(pd.to_datetime(dates))
     iso = index.isocalendar()
     keys = list(zip(iso.year.to_numpy(), iso.week.to_numpy()))
-    return np.asarray([i for i, key in enumerate(keys)
-                       if i == 0 or key != keys[i - 1]], dtype=int)
+    first = {}
+    for i, key in enumerate(keys):
+        if key not in first or index[i] < index[first[key]]:
+            first[key] = i
+    return np.asarray([first[key] for key in sorted(first)], dtype=int)
 
 
 def buffered_long_short(scores, suspended, prev_w, long_entry, long_exit,
@@ -25,7 +28,10 @@ def buffered_long_short(scores, suspended, prev_w, long_entry, long_exit,
     keep_short = [int(i) for i in eligible
                   if prev_w[i] < 0 and rank[int(i)] > len(ranked) - short_exit]
     longs = keep_long + [int(i) for i in ranked if i not in keep_long]
-    shorts = keep_short + [int(i) for i in ranked[::-1] if i not in keep_short]
+    selected_longs = set(longs[:long_entry + len(keep_long)])
+    shorts = [i for i in keep_short if i not in selected_longs]
+    shorts += [int(i) for i in ranked[::-1]
+               if i not in keep_short and int(i) not in selected_longs]
     return np.asarray(longs[:long_entry + len(keep_long)], dtype=int), np.asarray(
         sorted(shorts[:short_entry + len(keep_short)]), dtype=int)
 
@@ -38,6 +44,9 @@ def project_turnover(prev, target, frozen, budget, long_cap, short_cap):
         raise ValueError("non-finite weight supplied to turnover projection")
     if previous.shape != desired.shape or frozen.shape != previous.shape:
         raise ValueError("weight and frozen shapes must match")
+    for name, value in (("budget", budget), ("long_cap", long_cap), ("short_cap", short_cap)):
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and non-negative")
     desired[frozen] = previous[frozen]
     desired[previous * desired < 0] = 0.0
     frozen_long = np.clip(previous[frozen], 0, None).sum()

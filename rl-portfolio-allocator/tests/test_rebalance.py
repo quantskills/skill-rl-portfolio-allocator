@@ -9,9 +9,9 @@ from scripts.rebalance import (
 
 
 def test_weekly_decision_indices_selects_first_trading_date_per_iso_week():
-    dates = np.array(["2024-01-02", "2024-01-03", "2024-01-08", "2024-01-15"])
+    dates = np.array(["2024-01-03", "2024-01-02", "2024-01-08", "2024-01-15"])
 
-    assert weekly_decision_indices(dates).tolist() == [0, 2, 3]
+    assert weekly_decision_indices(dates).tolist() == [1, 2, 3]
 
 
 def test_buffered_long_short_keeps_existing_positions_inside_rank_buffer():
@@ -44,6 +44,20 @@ def test_buffered_long_short_does_not_select_suspended_names():
     assert shorts.tolist() == [3]
 
 
+def test_buffered_long_short_keeps_long_and_short_selections_disjoint():
+    scores = np.array([4.0, 3.0, 2.0, 1.0])
+    suspended = np.zeros(4, dtype=bool)
+    prev_w = np.array([0.1, 0.0, 0.0, -0.1])
+
+    longs, shorts = buffered_long_short(
+        scores, suspended, prev_w,
+        long_entry=3, long_exit=3,
+        short_entry=3, short_exit=3,
+    )
+
+    assert set(longs).isdisjoint(set(shorts))
+
+
 def test_project_turnover_preserves_frozen_and_respects_caps_and_budget():
     prev = np.array([0.4, -0.2, 0.0, 0.0])
     target = np.array([0.1, -0.4, 0.8, -0.8])
@@ -72,3 +86,12 @@ def test_project_turnover_rejects_nonfinite_inputs(bad):
     with pytest.raises(ValueError):
         project_turnover(np.array([0.0]), np.array([bad]), np.array([False]),
                          budget=1.0, long_cap=1.0, short_cap=1.0)
+
+
+@pytest.mark.parametrize("parameter", ["budget", "long_cap", "short_cap"])
+def test_project_turnover_rejects_negative_limits(parameter):
+    limits = {"budget": 1.0, "long_cap": 1.0, "short_cap": 1.0}
+    limits[parameter] = -1.0
+
+    with pytest.raises(ValueError):
+        project_turnover(np.array([0.0]), np.array([0.0]), np.array([False]), **limits)
