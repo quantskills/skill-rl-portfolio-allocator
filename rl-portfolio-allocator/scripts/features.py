@@ -19,6 +19,9 @@ import numpy as np
 import pandas as pd
 
 from scripts.config import FACTOR_NAMES, get_config
+from scripts.factor_cache import BASE_COLUMNS, write_factor_cache
+from scripts.factor_catalog import FACTOR_CATALOG
+from scripts.factor_compute import compute_factor_panel
 
 _EPS = 1e-12
 
@@ -62,7 +65,11 @@ def compute_factors(prices: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"prices missing columns: {missing}")
     if "is_suspended" not in prices.columns:
         prices = prices.assign(is_suspended=False)
-    df = prices.groupby("symbol", group_keys=False).apply(_compute_single_symbol)
+    symbol_frames = [
+        _compute_single_symbol(group)
+        for _, group in prices.groupby("symbol", sort=True)
+    ]
+    df = pd.concat(symbol_frames, axis=0) if symbol_frames else prices.copy()
     df = _cross_sectional_zscore(df, FACTOR_NAMES)
     keep = ["trade_date", "symbol", "ret_1d", "is_suspended", *FACTOR_NAMES]
     return df[keep].reset_index(drop=True)
@@ -153,6 +160,15 @@ def main() -> None:
     universe = load_universe(start, end)
     symbols = sorted(universe["symbol"].unique().tolist())
     prices = load_prices(symbols, start, end)
+    prices["trade_date"] = pd.to_datetime(prices["trade_date"])
+
+    full_panel = compute_factor_panel(prices)
+    factor_names = [spec.name for spec in FACTOR_CATALOG]
+    full_panel = full_panel.loc[:, [*BASE_COLUMNS, *factor_names]]
+    factor_root = pathlib.Path(__file__).resolve().parent.parent / "data" / "factors"
+    write_factor_cache(full_panel, factor_root)
+    print(f"factor cache saved: {factor_root}  rows={len(full_panel)}  factors={len(factor_names)}")
+
     feats = compute_factors(prices)
 
     # Filter out early dates where we don't have enough history for turnover_20 calculation
