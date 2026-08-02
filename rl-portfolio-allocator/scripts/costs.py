@@ -3,6 +3,15 @@ from __future__ import annotations
 import numpy as np
 
 
+def scaled_cost_config(cfg: dict, multiplier: float) -> dict:
+    if not np.isfinite(multiplier) or multiplier <= 0:
+        raise ValueError("cost multiplier must be positive")
+    out = dict(cfg)
+    for key in ("commission_bps", "stamp_tax_bps", "impact_bps", "borrow_rate_annual"):
+        out[key] = cfg[key] * multiplier
+    return out
+
+
 def commission_cost(prev_w: np.ndarray, target_w: np.ndarray, commission_bps: float) -> float:
     turnover = float(np.abs(target_w - prev_w).sum())
     return commission_bps / 1e4 * turnover

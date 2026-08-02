@@ -46,6 +46,10 @@ def validate_weights(df: pd.DataFrame, cfg: dict) -> list:
             errs.append(f"{date}: long notional {long_sum:.4f} > cap {cfg['long_notional']}")
         if short_sum > cfg["short_notional_cap"] + _TOL:
             errs.append(f"{date}: short notional {short_sum:.4f} > cap {cfg['short_notional_cap']}")
+        stock_sum = float(g.loc[g["side"].isin(["long", "short"]), "weight"].sum())
+        cash_sum = float(g.loc[g["side"] == "cash", "weight"].sum())
+        if abs(stock_sum + cash_sum - 1.0) > _TOL:
+            errs.append(f"{date}: cash identity stock + cash weights must equal 1")
         if not g["weight"].apply(lambda x: x == x and abs(x) < 1e9).all():
             errs.append(f"{date}: non-finite weight detected")
     return errs

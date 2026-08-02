@@ -1,41 +1,67 @@
+import numpy as np
+import pytest
+
 from scripts.config import get_config
-from scripts.reward import compose_reward
+from scripts.diagnostics import reward_quality_report
+from scripts.reward import compose_reward, reward_coefficients
 
 
-def _parts(net_ret, drawdown=0.1, turnover=0.8, hhi_val=0.05):
+def _parts(net_ret, prev_drawdown=0.0, drawdown=0.1, turnover=0.8, hhi_val=0.05,
+           variant="medium"):
     cfg = get_config()
-    total, parts = compose_reward(
-        dsr_delta=0.0018, drawdown=drawdown, turnover=turnover,
-        hhi_val=hhi_val, cfg=cfg, net_ret=net_ret,
-        long_notional=1.0, short_notional=0.3, long_cap=1.0, short_cap=0.3,
-    )
-    return total, parts
+    cfg["reward_variant"] = variant
+    return compose_reward(net_ret, prev_drawdown, drawdown, turnover, hhi_val, cfg)
 
 
-def test_reward_parts_complete():
+def test_reward_coefficients_are_explicit():
+    assert reward_coefficients("none") == (0.0, 0.0, 0.0)
+    assert reward_coefficients("low") == (0.5, 0.5, 0.05)
+    assert reward_coefficients("medium") == (1.0, 1.0, 0.10)
+
+
+def test_reward_parts_have_new_contract_without_dsr():
     total, parts = _parts(0.005)
-    for k in ("ret_term", "dsr", "drawdown_penalty", "turnover_penalty",
-              "concentration_penalty", "constraint_penalty", "total"):
-        assert k in parts, f"missing {k}"
-    s = (parts["ret_term"] + parts["dsr"] + parts["drawdown_penalty"]
-         + parts["turnover_penalty"] + parts["concentration_penalty"]
-         + parts["constraint_penalty"])
-    assert abs(s - parts["total"]) < 1e-12
+    for key in ("scaled_net_return", "incremental_drawdown_penalty", "turnover_penalty",
+                "concentration_penalty", "total"):
+        assert key in parts, f"missing {key}"
+    assert "dsr" not in parts
+    subtotal = (parts["scaled_net_return"] + parts["incremental_drawdown_penalty"]
+                + parts["turnover_penalty"] + parts["concentration_penalty"])
+    assert abs(subtotal - parts["total"]) < 1e-12
     assert abs(total - parts["total"]) < 1e-12
 
 
-def test_return_term_not_dominated_by_penalties():
-    # 典型单步: 净收益 +0.5%, 换手 0.8, 回撤 10%
-    total, parts = _parts(0.005)
-    penalties = abs(parts["drawdown_penalty"] + parts["turnover_penalty"]
-                    + parts["concentration_penalty"])
-    assert abs(parts["ret_term"]) > 0
-    # 修复前 penalty/return ≈ 26x; 要求降到 ≤ 5x
-    assert penalties / abs(parts["ret_term"]) <= 5.0, (
-        f"penalties {penalties} dominate ret_term {parts['ret_term']}")
+def test_scaled_return_and_incremental_excess_penalties():
+    _, parts = _parts(0.005, prev_drawdown=0.02, drawdown=0.05,
+                      turnover=0.30, hhi_val=0.05, variant="low")
+    assert parts["scaled_net_return"] == 0.5
+    assert parts["incremental_drawdown_penalty"] == pytest.approx(-0.015)
+    assert parts["turnover_penalty"] == pytest.approx(-0.005)
+    assert parts["concentration_penalty"] == pytest.approx(-0.01)
 
 
 def test_positive_return_raises_reward():
     lo, _ = _parts(0.002)
     hi, _ = _parts(0.010)
     assert hi > lo
+
+
+def test_drawdown_does_not_repeat_when_it_does_not_increase():
+    _, parts = _parts(0.0, prev_drawdown=0.1, drawdown=0.1)
+    assert parts["incremental_drawdown_penalty"] == 0.0
+
+
+def test_reward_is_bounded_by_clip():
+    total, _ = _parts(1.0, drawdown=10.0, turnover=10.0, hhi_val=10.0)
+    assert total == 5.0
+    total, _ = _parts(-1.0, drawdown=10.0, turnover=10.0, hhi_val=10.0)
+    assert total == -5.0
+
+
+def test_reward_quality_contract():
+    rewards = np.linspace(-1.0, 1.0, 1000)
+    report = reward_quality_report(rewards)
+    assert report["std_in_range"]
+    assert report["abs_q999"] <= 5.0
+    assert report["max_abs_share"] <= 0.01
+    assert report["passed"]

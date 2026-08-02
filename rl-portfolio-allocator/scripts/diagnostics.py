@@ -3,6 +3,25 @@ from __future__ import annotations
 import numpy as np
 
 
+def reward_quality_report(rewards) -> dict:
+    values = np.asarray(rewards, dtype=float)
+    if values.size == 0:
+        return {"std": 0.0, "std_in_range": False, "abs_q999": 0.0,
+                "max_abs_share": 0.0, "passed": False}
+    absolute = np.abs(values)
+    abs_q999 = float(np.quantile(absolute, 0.999))
+    total_absolute = float(absolute.sum())
+    max_abs_share = float(absolute.max() / total_absolute) if total_absolute else 0.0
+    std = float(values.std())
+    return {
+        "std": std,
+        "std_in_range": 0.5 <= std <= 2.0,
+        "abs_q999": abs_q999,
+        "max_abs_share": max_abs_share,
+        "passed": 0.5 <= std <= 2.0 and abs_q999 <= 5.0 and max_abs_share <= 0.01,
+    }
+
+
 def summarize_rollout(infos: list, trading_days: int = 252) -> dict:
     if not infos:
         return {}
@@ -22,9 +41,13 @@ def summarize_rollout(infos: list, trading_days: int = 252) -> dict:
             "impact_bps_per_day": float(np.mean([i["impact"] for i in infos])) * 1e4,
             "borrow_bps_per_day": float(np.mean([i["borrow"] for i in infos])) * 1e4,
         },
+        "dsr_metric_mean": float(np.mean([
+            i.get("diagnostics", {}).get("dsr_metric", i.get("dsr", 0.0))
+            for i in infos
+        ])),
         "reward_breakdown": {
-            "dsr_mean": float(np.mean([i["reward_parts"]["dsr"] for i in infos])),
-            "drawdown_penalty_mean": float(np.mean([i["reward_parts"]["drawdown_penalty"] for i in infos])),
+            "scaled_net_return_mean": float(np.mean([i["reward_parts"].get("scaled_net_return", 0.0) for i in infos])),
+            "incremental_drawdown_penalty_mean": float(np.mean([i["reward_parts"].get("incremental_drawdown_penalty", i["reward_parts"].get("drawdown_penalty", 0.0)) for i in infos])),
             "turnover_penalty_mean": float(np.mean([i["reward_parts"]["turnover_penalty"] for i in infos])),
             "concentration_penalty_mean": float(np.mean([i["reward_parts"]["concentration_penalty"] for i in infos])),
         },

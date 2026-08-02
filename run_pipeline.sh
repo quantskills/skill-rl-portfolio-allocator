@@ -1,182 +1,127 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -e
+# Research is the default mode.  Production files are only touched by the
+# explicit --publish command and a passing, user-supplied approval record.
+set -Eeuo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${PROJECT_DIR}/rl-portfolio-allocator"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+export PYTHONPATH="${WORK_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+log() { printf '[rlpa] %s\n' "$*"; }
+die() { printf '[rlpa] ERROR: %s\n' "$*" >&2; exit 1; }
 
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-check_credentials() {
-    if [[ -z "$PANDA_DATA_USERNAME" || -z "$PANDA_DATA_PASSWORD" ]]; then
-        log_error "PANDA_DATA_USERNAME 或 PANDA_DATA_PASSWORD 未设置"
-        echo "请运行以下命令设置凭据:"
-        echo "  export PANDA_DATA_USERNAME=<your-username>"
-        echo "  export PANDA_DATA_PASSWORD=<your-password>"
-        exit 1
-    fi
-    log_info "Panda Data 凭据已设置"
-}
-
-check_dependencies() {
-    log_info "检查依赖..."
-
-    if ! python -c "import stable_baselines3" 2>/dev/null; then
-        log_warn "stable_baselines3 未安装，正在安装..."
-        pip install "stable-baselines3>=2.0" gymnasium
-    fi
-
-    if ! python -c "import gymnasium" 2>/dev/null; then
-        log_error "gymnasium 安装失败"
-        exit 1
-    fi
-
-    log_info "依赖检查完成"
+require_credentials() {
+    [[ -n "${PANDA_DATA_USERNAME:-}" && -n "${PANDA_DATA_PASSWORD:-}" ]] || \
+        die 'PANDA_DATA_USERNAME and PANDA_DATA_PASSWORD are required for data generation'
 }
 
 run_features() {
-    log_info "生成特征数据..."
-    cd "$WORK_DIR"
-    PYTHONPATH="$WORK_DIR:$PYTHONPATH" python -m scripts.features
-    log_info "特征数据生成完成"
+    require_credentials
+    (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.features)
 }
 
-run_train() {
-    log_info "训练模型..."
-    cd "$WORK_DIR"
-    PYTHONPATH="$WORK_DIR:$PYTHONPATH" python -m scripts.train --timesteps 200000
-    log_info "模型训练完成"
+run_market_state() {
+    (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.market_state)
 }
 
-run_backtest() {
-    log_info "回测模型..."
-    cd "$WORK_DIR"
-    PYTHONPATH="$WORK_DIR:$PYTHONPATH" python -m scripts.backtest
-    log_info "回测完成"
+run_coverage() {
+    (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.check_data_coverage \
+        --json artifacts/state/data_coverage.json)
 }
 
-run_stress_test() {
-    log_info "压力测试（4个市场阶段）..."
-    cd "$WORK_DIR"
-    PYTHONPATH="$WORK_DIR:$PYTHONPATH" python -m scripts.stress_test
-    log_info "压力测试完成"
+run_tests() { (cd "$WORK_DIR" && "$PYTHON_BIN" -m pytest -q); }
+
+run_walk_forward() {
+    local mode="$1"
+    (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.walk_forward "$mode")
 }
 
-run_allocate() {
-    log_info "生成配置（重新训练模式）..."
-    cd "$WORK_DIR"
-    PYTHONPATH="$WORK_DIR:$PYTHONPATH" python -m scripts.allocate --retrain
-    log_info "配置生成完成"
+run_research_gates() {
+    local run_root="$1"
+    local allow_failed="${2:-false}"
+    local gates="${WORK_DIR}/${run_root}/gates.json"
+    [[ -f "$gates" ]] || die "research gates report missing: $gates"
+    "$PYTHON_BIN" - "$gates" "$allow_failed" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+report = json.loads(path.read_text(encoding="utf-8"))
+if report.get("research_ok") is not True:
+    failed = [g.get("name", "unknown") for g in report.get("gates", []) if not g.get("passed")]
+    message = "research gate failed: " + ", ".join(failed or ["missing research_ok=true"])
+    if sys.argv[2] == "true":
+        print("WARNING: " + message + "; publication remains disabled")
+    else:
+        raise SystemExit(message)
+print(f"research gates passed: {path}")
+PY
 }
 
-run_validate() {
-    log_info "验证模型..."
-    cd "$WORK_DIR"
-    PYTHONPATH="$WORK_DIR:$PYTHONPATH" python -m scripts.validate
-    log_info "验证完成"
+run_stress() { (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.stress_test); }
+
+run_publish() {
+    local approval="$1"
+    [[ -n "$approval" ]] || die '--publish requires --approval APPROVAL_JSON'
+    [[ -f "$approval" ]] || die "approval file missing: $approval"
+    (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.allocate --retrain --approval "$approval")
+    (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.validate)
 }
 
-show_usage() {
-    cat << EOF
-用法: $0 [选项]
+run_research() {
+    local mode="$1"
+    local wf_mode="$2"
+    run_features
+    run_market_state
+    run_coverage
+    run_tests
+    run_walk_forward "$wf_mode"
+    if [[ "$mode" == "smoke" ]]; then
+        run_research_gates "artifacts/walk_forward/${mode}" true
+    else
+        run_research_gates "artifacts/walk_forward/${mode}"
+    fi
+    run_stress
+}
 
-选项:
-    --all              运行完整流程 (features -> train -> backtest -> stress_test -> allocate -> validate)
-    --features         只生成特征数据
-    --train            只训练模型
-    --backtest         只运行回测
-    --stress-test      只运行压力测试
-    --allocate         只生成配置
-    --validate         只验证模型
-    --quick            快速流程 (features -> train -> backtest)
-    --help             显示帮助信息
+usage() {
+    cat <<'EOF'
+Usage: ./run_pipeline.sh [--all | --research-smoke | --research-full | --publish --approval PATH]
 
-环境变量:
-    PANDA_DATA_USERNAME  Panda Data 用户名（必需）
-    PANDA_DATA_PASSWORD  Panda Data 密码（必需）
-    TRAIN_DEVICE         训练设备 (cpu/cuda/mps, 默认自动检测)
+Research (fail-closed):
+  --all             Alias for --research-smoke; never publishes production files.
+  --research-smoke  features -> market_state -> coverage -> pytest -> walk-forward smoke -> gate -> stress.
+  --research-full   Same sequence with all configured folds and seeds.
 
-示例:
-    # 设置凭据并运行完整流程
-    export PANDA_DATA_USERNAME=your_username
-    export PANDA_DATA_PASSWORD=your_password
-    $0 --all
+Production (explicit approval required):
+  --publish --approval PATH
+                    retrain production, then validate allocations. The approval
+                    must be emitted by a passing full walk-forward run.
 
-    # 运行快速流程
-    $0 --quick
-
-    # 只生成特征
-    $0 --features
-
+  --help            Show this help without credentials or data access.
 EOF
 }
 
 main() {
-    if [[ $# -eq 0 ]]; then
-        show_usage
-        exit 0
-    fi
-
-    check_credentials
-    check_dependencies
-
-    case "$1" in
-        --all)
-            run_features
-            run_train
-            run_backtest
-            run_stress_test
-            run_allocate
-            run_validate
-            log_info "完整流程执行完成！"
+    local command="${1:---help}"
+    case "$command" in
+        --help|-h) usage ;;
+        --all|--research-smoke)
+            [[ $# -eq 1 ]] || die "$command does not accept extra arguments"
+            run_research smoke --smoke
             ;;
-        --features)
-            run_features
+        --research-full)
+            [[ $# -eq 1 ]] || die '--research-full does not accept extra arguments'
+            run_research full --full
             ;;
-        --train)
-            run_train
+        --publish)
+            [[ $# -eq 3 && "$2" == "--approval" ]] || die 'usage: --publish --approval APPROVAL_JSON'
+            run_publish "$3"
             ;;
-        --backtest)
-            run_backtest
-            ;;
-        --stress-test)
-            run_stress_test
-            ;;
-        --allocate)
-            run_allocate
-            ;;
-        --validate)
-            run_validate
-            ;;
-        --quick)
-            run_features
-            run_train
-            run_backtest
-            log_info "快速流程执行完成！"
-            ;;
-        --help)
-            show_usage
-            ;;
-        *)
-            log_error "未知选项: $1"
-            show_usage
-            exit 1
-            ;;
+        *) usage >&2; die "unknown option: $command" ;;
     esac
 }
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import json
+import shutil
 import pathlib
 from datetime import datetime, timezone
 
@@ -12,28 +13,114 @@ import pandas as pd
 from scripts.config import (
     get_config, FACTOR_NAMES, K, STRATEGY_ID, DATA_VERSION
 )
-from scripts.env import PortfolioEnv
+from scripts.env import PortfolioEnv, effective_range
 from scripts.train import train_ppo, load_ppo, select_device
+from scripts.walk_forward import frozen_method_id
+from scripts.validate import run_all
+
+
+def load_research_approval(path) -> dict:
+    approval_path = pathlib.Path(path)
+    if not approval_path.exists():
+        raise FileNotFoundError(f"research approval missing: {approval_path}")
+    data = json.loads(approval_path.read_text(encoding="utf-8"))
+    if data.get("research_ok") is not True:
+        raise RuntimeError("research_ok gate did not pass")
+    required = {"schema_version", "method_id", "method_path", "gates_path"}
+    missing = required - set(data)
+    if missing:
+        raise ValueError(f"approval missing fields: {sorted(missing)}")
+    method_path = approval_path.parent / data["method_path"]
+    gates_path = approval_path.parent / data["gates_path"]
+    if not method_path.exists() or not gates_path.exists():
+        raise FileNotFoundError("approval references missing method or gates")
+    method = json.loads(method_path.read_text(encoding="utf-8"))
+    if data["schema_version"] != method.get("schema_version"):
+        raise RuntimeError("approval and method schema mismatch")
+    if frozen_method_id(method) != data["method_id"]:
+        raise RuntimeError("approved method hash mismatch")
+    gates = json.loads(gates_path.read_text(encoding="utf-8"))
+    if gates.get("research_ok") is not True:
+        raise RuntimeError("approved gates did not pass")
+    return data
+
+
+def atomic_publish(candidate_dir, production_dir) -> None:
+    candidate = pathlib.Path(candidate_dir)
+    production = pathlib.Path(production_dir)
+    approval = candidate / "approval.json"
+    if not approval.exists():
+        raise FileNotFoundError("candidate approval missing")
+    scaler = candidate / "scaler.json"
+    checkpoint = candidate / "checkpoint.zip"
+    allocations = candidate / "allocations.parquet"
+    if not scaler.exists() or not checkpoint.exists() or not allocations.exists():
+        raise FileNotFoundError("candidate allocations, scaler, or checkpoint missing")
+    load_research_approval(approval)
+    if json.loads(scaler.read_text(encoding="utf-8")).get("schema_version") != "state-v1":
+        raise ValueError("candidate scaler schema mismatch")
+    if checkpoint.stat().st_size == 0:
+        raise ValueError("candidate checkpoint is empty")
+    metadata = candidate / "checkpoint_metadata.json"
+    if metadata.exists():
+        checkpoint_meta = json.loads(metadata.read_text(encoding="utf-8"))
+        approval_data = json.loads(approval.read_text(encoding="utf-8"))
+        if checkpoint_meta.get("schema_version") != approval_data["schema_version"]:
+            raise ValueError("candidate checkpoint metadata schema mismatch")
+    ok, errors = run_all(str(allocations), get_config())
+    if not ok:
+        raise ValueError("candidate allocations failed validation: " + "; ".join(errors))
+    production.parent.mkdir(parents=True, exist_ok=True)
+    staging = production.parent / (production.name + ".staging")
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir()
+    for name in ("allocations.parquet", "checkpoint.zip", "scaler.json", "approval.json"):
+        shutil.copy2(candidate / name, staging / name)
+    # Publish a complete staged bundle. The pointer is replaced only after every
+    # artifact has been copied and validated, so readers never observe a partial
+    # candidate bundle through CURRENT.
+    pointer = production.parent / (production.name + ".CURRENT")
+    pointer_tmp = production.parent / (production.name + ".CURRENT.tmp")
+    pointer_tmp.write_text(production.name, encoding="utf-8")
+    pointer_tmp.replace(pointer)
+    backup = production.parent / (production.name + ".previous")
+    if backup.exists():
+        shutil.rmtree(backup)
+    try:
+        if production.exists():
+            production.replace(backup)
+        staging.replace(production)
+    except Exception:
+        if production.exists():
+            shutil.rmtree(production)
+        if backup.exists():
+            backup.replace(production)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
 
 
 def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
-                        seed: int, checkpoint_path: str) -> str:
+                        seed: int, checkpoint_path: str,
+                        market_state_df: pd.DataFrame) -> str:
     dates = pd.to_datetime(features_df["trade_date"])
-    start, end = dates.min(), dates.max()
-    idx = pd.Series(np.zeros(1), index=[dates.min()])
-    env = PortfolioEnv(features_df, idx, cfg, start, end)
+    start, end = effective_range(features_df, market_state_df, dates.min(), dates.max())
+    print(f"effective range: {start.date()} ~ {end.date()}")
+    env = PortfolioEnv(features_df, market_state_df, cfg, start, end)
     device = select_device(cfg["train_device"])
     train_ppo(env, total_timesteps=timesteps, seed=seed, device=device, save_path=checkpoint_path)
     return checkpoint_path
 
 
-def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str) -> pd.DataFrame:
+def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str,
+                 market_state_df: pd.DataFrame) -> pd.DataFrame:
     dates = pd.to_datetime(features_df["trade_date"]).unique()
     dates = sorted(dates)
     ctx_start = dates[max(0, len(dates) - 60)]
     end = dates[-1]
-    idx = pd.Series(np.zeros(1), index=[ctx_start])
-    env = PortfolioEnv(features_df, idx, cfg, ctx_start, end)
+    ctx_start, end = effective_range(features_df, market_state_df, ctx_start, end)
+    env = PortfolioEnv(features_df, market_state_df, cfg, ctx_start, end)
     model = load_ppo(model_path, env)
 
     obs, _ = env.reset(seed=0)
@@ -121,6 +208,7 @@ def main() -> None:
     cfg = get_config()
     root = pathlib.Path(__file__).resolve().parent.parent
     feats_path = root / "data" / "features.parquet"
+    market_state_path = root / "data" / "market_state.parquet"
     ckpt = root / "checkpoints" / "production.zip"
     out_path = root.parent / "rl-portfolio-allocator-production" / "data" / "allocations.parquet"
 
@@ -129,15 +217,25 @@ def main() -> None:
     grp.add_argument("--retrain", action="store_true", help="用数据起点~最新日全部数据重训生产模型")
     grp.add_argument("--infer-only", action="store_true", help="复用现有生产模型仅推理当日持仓")
     p.add_argument("--timesteps", type=int, default=200_000)
+    p.add_argument("--approval", required=True,
+                   help="research approval.json; production execution fails closed without it")
     args = p.parse_args()
 
+    load_research_approval(args.approval)
+
     feats = pd.read_parquet(feats_path)
+    market_state = pd.read_parquet(market_state_path)
     if args.retrain:
-        retrain_production(feats, cfg, args.timesteps, seed=0, checkpoint_path=str(ckpt))
+        retrain_production(
+            feats, cfg, args.timesteps, seed=0,
+            checkpoint_path=str(ckpt), market_state_df=market_state,
+        )
         print(f"production checkpoint saved: {ckpt}")
     if not ckpt.exists():
         raise SystemExit(f"no production checkpoint at {ckpt}; run --retrain first")
-    allocations = infer_latest(feats, cfg, model_path=str(ckpt))
+    allocations = infer_latest(
+        feats, cfg, model_path=str(ckpt), market_state_df=market_state
+    )
     save_allocations(allocations, str(out_path))
     print(f"allocations saved: {out_path}  rows={len(allocations)}")
 

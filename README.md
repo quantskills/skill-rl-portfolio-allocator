@@ -1,6 +1,6 @@
 # skill-rl-portfolio-allocator
 
-PPO 学 K 维因子权重 → CSI300 多空组合。Reward = 差分 Sharpe(DSR)+ 回撤/换手/集中度惩罚;成本(佣金/印花税/融券/冲击)内嵌 env。
+PPO 学 K 维因子权重 → CSI300 多空组合。研究系统使用严格因果的 market state、bounded net-return reward、周频 action、净成本和多 fold/seed walk-forward gate。研究 gate 未通过时不允许发布生产产物。
 
 - 研究/训练:见 `rl-portfolio-allocator/SKILL.md`
 - 只读生产查询:见 `rl-portfolio-allocator-production/SKILL.md`
@@ -11,16 +11,21 @@ PPO 学 K 维因子权重 → CSI300 多空组合。Reward = 差分 Sharpe(DSR)+
 ```bash
 export PANDA_DATA_USERNAME=<your>
 export PANDA_DATA_PASSWORD=<your>
-cd rl-portfolio-allocator
-python scripts/features.py
-python scripts/train.py
-python scripts/backtest.py
-python scripts/stress_test.py
-python scripts/allocate.py --retrain
-python scripts/validate.py
+./run_pipeline.sh --research-smoke
+# full OOS research (可能较慢)
+./run_pipeline.sh --research-full
+# 只有 full gate 通过后，显式 approval 才能发布
+./run_pipeline.sh --publish --approval rl-portfolio-allocator/artifacts/walk_forward/<run-id>/approval.json
 ```
 
-## 已实现能力(与设计 §8 验收标准对照)
+## 研究与发布边界
+
+- smoke 只验证 wiring，`publishable=false`，不会生成生产 approval。
+- full 研究只在验证集选 candidate；测试集每个 fold/seed 只运行一次。
+- `research_ok=false` 是合法研究结果，不能通过调阈值或手工 approval 绕过。
+- 生产 retrain 没有 OOS 尾巴，且必须由 `approval.json` 解锁；发布后仍需 `validate`。
+
+## 已实现能力
 
 | 验收项 | 由哪个 Task/脚本承担 |
 |---|---|
