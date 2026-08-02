@@ -63,6 +63,8 @@ def select_candidate_on_validation(rows):
 
 
 def _jsonable(value):
+    if hasattr(value, "tolist"):
+        return _jsonable(value.tolist())
     if isinstance(value, pathlib.Path):
         return str(value)
     if isinstance(value, (tuple, list)):
@@ -89,12 +91,19 @@ def aggregate_research_summary(test_rows, total_folds: int) -> dict:
     def median_field(name):
         values = [float(row[name]) for row in test_rows if row.get(name) is not None]
         return median(values) if values else None
-    positive = [row for row in test_rows if row.get("excess_return") is not None and row["excess_return"] > 0]
+    by_fold = defaultdict(list)
+    for row in test_rows:
+        by_fold[row.get("fold")].append(row)
+    positive_folds = 0
+    for rows in by_fold.values():
+        excess = [float(row["excess_return"]) for row in rows if row.get("excess_return") is not None]
+        if excess and median(excess) > 0:
+            positive_folds += 1
     return {
         "combined_oos_arr": median_field("oos_arr"),
         "median_seed_oos_sharpe": median_field("oos_sharpe"),
         "strongest_baseline_sharpe": median_field("strongest_baseline_sharpe"),
-        "positive_excess_return_folds": len({row.get("fold") for row in positive}),
+        "positive_excess_return_folds": positive_folds,
         "total_folds": total_folds,
         "median_seed_excess_return": median_field("excess_return"),
         "oos_mdd": median_field("oos_mdd"),
@@ -282,7 +291,7 @@ def _default_tester(**kwargs) -> dict:
     if not checkpoint_path or not pathlib.Path(checkpoint_path).exists():
         raise ValueError("frozen validation checkpoint is required; tester will not retrain")
     from scripts.env import PortfolioEnv
-    from scripts.metrics import sharpe
+    from scripts.metrics import metrics_pack
     from scripts.train import load_ppo
     cfg = dict(kwargs.get("cfg") or {})
     cfg["reward_variant"] = kwargs["reward_variant"]
@@ -298,7 +307,14 @@ def _default_tester(**kwargs) -> dict:
         obs, _, terminated, truncated, info = env.step(action)
         returns.extend(info["daily_net_rets"])
         done = terminated or truncated
-    return {"test_sharpe": float(sharpe(returns))}
+    metrics = metrics_pack(returns, "test")
+    return {
+        "test_sharpe": metrics["sharpe"],
+        "oos_sharpe": metrics["sharpe"],
+        "oos_arr": metrics["arr"],
+        "oos_mdd": metrics["mdd"],
+        "daily_returns": returns,
+    }
 
 
 def main() -> int:
