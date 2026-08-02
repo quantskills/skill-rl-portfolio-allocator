@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 
-FACTOR_NAMES: list[str] = [
+CONTROL_FACTOR_NAMES: list[str] = [
     "mom_20",
     "reversal_5",
     "vol_20",
@@ -10,7 +10,8 @@ FACTOR_NAMES: list[str] = [
     "amihud_20",
     "ret_skew_60",
 ]
-K: int = len(FACTOR_NAMES)
+FACTOR_NAMES = CONTROL_FACTOR_NAMES  # compatibility during migration
+K: int = len(CONTROL_FACTOR_NAMES)
 
 TOP_N: int = 30
 BOTTOM_M: int = 15
