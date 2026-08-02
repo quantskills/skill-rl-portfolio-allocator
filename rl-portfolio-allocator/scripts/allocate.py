@@ -61,6 +61,12 @@ def atomic_publish(candidate_dir, production_dir) -> None:
         raise ValueError("candidate scaler schema mismatch")
     if checkpoint.stat().st_size == 0:
         raise ValueError("candidate checkpoint is empty")
+    metadata = candidate / "checkpoint_metadata.json"
+    if metadata.exists():
+        checkpoint_meta = json.loads(metadata.read_text(encoding="utf-8"))
+        approval_data = json.loads(approval.read_text(encoding="utf-8"))
+        if checkpoint_meta.get("schema_version") != approval_data["schema_version"]:
+            raise ValueError("candidate checkpoint metadata schema mismatch")
     ok, errors = run_all(str(allocations), get_config())
     if not ok:
         raise ValueError("candidate allocations failed validation: " + "; ".join(errors))
@@ -78,9 +84,21 @@ def atomic_publish(candidate_dir, production_dir) -> None:
     pointer_tmp = production.parent / (production.name + ".CURRENT.tmp")
     pointer_tmp.write_text(production.name, encoding="utf-8")
     pointer_tmp.replace(pointer)
-    if production.exists():
-        shutil.rmtree(production)
-    staging.replace(production)
+    backup = production.parent / (production.name + ".previous")
+    if backup.exists():
+        shutil.rmtree(backup)
+    try:
+        if production.exists():
+            production.replace(backup)
+        staging.replace(production)
+    except Exception:
+        if production.exists():
+            shutil.rmtree(production)
+        if backup.exists():
+            backup.replace(production)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
 
 
 def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
