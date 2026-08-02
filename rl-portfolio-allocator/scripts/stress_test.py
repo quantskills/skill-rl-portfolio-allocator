@@ -2,6 +2,7 @@
 数据不足则明确报告并跳过,不伪造替代。除全 test 段外额外报告"核心段"指标。"""
 from __future__ import annotations
 import argparse
+import json
 import pathlib
 import numpy as np
 import pandas as pd
@@ -47,6 +48,13 @@ STRESS_SEGMENTS = [
 ]
 
 
+def load_frozen_method(path: str) -> dict:
+    method = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    if not method.get("frozen_candidate"):
+        raise ValueError("method artifact must contain frozen_candidate")
+    return method
+
+
 def _has_enough(feats: pd.DataFrame, market_state: pd.DataFrame,
                 train_end: str, min_years: int) -> tuple[bool, str, str]:
     d = pd.to_datetime(feats["trade_date"])
@@ -83,7 +91,7 @@ def _core_metrics(features_df: pd.DataFrame, cfg: dict,
 
 
 def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
-                   cfg: dict, timesteps: int = 100_000) -> list:
+                   cfg: dict, timesteps: int = 100_000, method: dict | None = None) -> list:
     out = []
     for seg in STRESS_SEGMENTS:
         ok, data_start, reason = _has_enough(
@@ -103,7 +111,13 @@ def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
             rl_daily_rets=res["rl_daily_rets"], rl_dates=res["rl_dates"],
             core_start=seg["core_start"], core_end=seg["core_end"],
         )
-        out.append({"name": seg["name"], "skipped": False, "core_metrics": core, **res})
+        record = {"name": seg["name"], "skipped": False, "core_metrics": core, **res}
+        if method is not None:
+            # This is an evaluation-only annotation. Candidate selection is
+            # deliberately absent from the stress path.
+            record["frozen_candidate"] = method["frozen_candidate"]
+            record["report_type"] = "frozen_method_stress"
+        out.append(record)
     return out
 
 
@@ -114,8 +128,19 @@ def main() -> None:
     market_state = pd.read_parquet(root / "data" / "market_state.parquet")
     p = argparse.ArgumentParser()
     p.add_argument("--timesteps", type=int, default=100_000)
+    p.add_argument("--method", default=None,
+                   help="frozen walk-forward method JSON; never reselects a candidate")
+    p.add_argument("--report", default=None,
+                   help="optional JSON path for the separate stress report")
     args = p.parse_args()
-    results = run_all_stress(feats, market_state, cfg, timesteps=args.timesteps)
+    method = load_frozen_method(args.method) if args.method else None
+    results = run_all_stress(feats, market_state, cfg, timesteps=args.timesteps, method=method)
+    if args.report:
+        pathlib.Path(args.report).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(args.report).write_text(
+            json.dumps({"report_type": "frozen_method_stress" if method else "stress", "results": results},
+                       default=str, indent=2), encoding="utf-8"
+        )
     print("=== Stress Test ===")
     for r in results:
         if r.get("skipped"):

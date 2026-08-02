@@ -1,0 +1,224 @@
+"""Leakage-safe walk-forward orchestration for the research-only OOS report."""
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import uuid
+from collections import defaultdict
+from statistics import median
+from typing import Callable
+
+from scripts.check_data_coverage import Fold, check_folds, default_folds
+
+
+SEEDS = (0, 1, 2, 3, 4)
+REWARD_CANDIDATES = ("none", "low", "medium", "legacy_dsr")
+BUFFER_CANDIDATES = ("tight", "default", "wide")
+BUFFER_CONFIGS = {
+    "tight": {"long_entry": 30, "long_exit": 40, "short_entry": 15, "short_exit": 25},
+    "default": {"long_entry": 30, "long_exit": 45, "short_entry": 15, "short_exit": 30},
+    "wide": {"long_entry": 30, "long_exit": 60, "short_entry": 15, "short_exit": 45},
+}
+
+
+def select_candidate_on_validation(rows):
+    """Select the highest-median candidate without inspecting test rows."""
+    scores = defaultdict(list)
+    for row in rows:
+        scores[row["candidate"]].append(float(row["val_sharpe"]))
+    if not scores:
+        raise ValueError("validation rows must not be empty")
+    return max(scores, key=lambda candidate: (median(scores[candidate]), -list(scores).index(candidate)))
+
+
+def _jsonable(value):
+    if isinstance(value, pathlib.Path):
+        return str(value)
+    if isinstance(value, (tuple, list)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    return value
+
+
+def _write(path: pathlib.Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_jsonable(payload), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _invoke_trainer(trainer: Callable, **kwargs) -> dict:
+    result = trainer(**kwargs)
+    if "val_sharpe" not in result:
+        raise ValueError("trainer result must contain val_sharpe")
+    return result
+
+
+def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, tester=None,
+                     coverage_checker=None, features_df=None, index_df=None,
+                     cfg=None, timesteps=None) -> dict:
+    """Run validation-only candidate selection followed by one frozen test per seed."""
+    folds = list(folds or default_folds())
+    if coverage_checker is not None:
+        coverage_checker()
+    elif features_df is not None and index_df is not None:
+        report = check_folds(features_df, index_df, folds)
+        if len(report["usable_folds"]) != len(folds):
+            raise ValueError("data coverage check rejected one or more walk-forward folds")
+    if trainer is None or tester is None:
+        raise ValueError("trainer and tester dependency injections are required")
+
+    selected_folds = [folds[-1]] if smoke else folds
+    selected_seeds = (0,) if smoke else SEEDS
+    root = pathlib.Path(output_root)
+    run_id = "smoke" if smoke else uuid.uuid4().hex
+    run_root = root if smoke else root / run_id
+    validation_root = run_root / "validation"
+    test_root = run_root / "test"
+    validation_rows = []
+    selected_rewards = {}
+
+    # Phase 1: default rank buffer, reward ablation. Tests are impossible here.
+    for fold in selected_folds:
+        for reward in REWARD_CANDIDATES:
+            for seed in selected_seeds:
+                result = _invoke_trainer(
+                    trainer, stage="reward_ablation", fold=fold.fold, seed=seed,
+                    candidate=reward, reward_variant=reward, buffer_variant="default",
+                    buffer_config=BUFFER_CONFIGS["default"], train_range=fold.train,
+                    val_range=fold.val, test_range=fold.test, timesteps=timesteps or (128 if smoke else 100_000),
+                    cfg=cfg, artifact_dir=validation_root / f"fold{fold.fold}" / reward / f"seed{seed}",
+                    features_df=features_df, market_state_df=index_df,
+                )
+                row = {"fold": fold.fold, "seed": seed, "candidate": reward,
+                       "val_sharpe": float(result["val_sharpe"]), "stage": "reward_ablation"}
+                validation_rows.append(row)
+                _write(validation_root / f"fold{fold.fold}" / "reward" / f"{reward}_seed{seed}.json", row)
+        selected_rewards[fold.fold] = select_candidate_on_validation(
+            [row for row in validation_rows if row["fold"] == fold.fold]
+        )
+
+    # Phase 2: buffer ablation with the reward choice frozen by validation only.
+    buffer_rows = []
+    selected_buffers = {}
+    for fold in selected_folds:
+        selected_reward = selected_rewards[fold.fold]
+        for buffer in BUFFER_CANDIDATES:
+            for seed in selected_seeds:
+                result = _invoke_trainer(
+                    trainer, stage="buffer_ablation", fold=fold.fold, seed=seed,
+                    candidate=buffer, reward_variant=selected_reward, buffer_variant=buffer,
+                    buffer_config=BUFFER_CONFIGS[buffer], train_range=fold.train,
+                    val_range=fold.val, test_range=fold.test, timesteps=timesteps or (128 if smoke else 100_000),
+                    cfg=cfg, artifact_dir=validation_root / f"fold{fold.fold}" / buffer / f"seed{seed}",
+                    features_df=features_df, market_state_df=index_df,
+                )
+                row = {"fold": fold.fold, "seed": seed, "candidate": buffer,
+                       "val_sharpe": float(result["val_sharpe"]), "stage": "buffer_ablation",
+                       "reward_variant": selected_reward}
+                buffer_rows.append(row)
+                _write(validation_root / f"fold{fold.fold}" / "buffer" / f"{buffer}_seed{seed}.json", row)
+        selected_buffers[fold.fold] = select_candidate_on_validation(
+            [row for row in buffer_rows if row["fold"] == fold.fold]
+        )
+
+    # Phase 3: freeze the method, then evaluate each seed exactly once on test.
+    test_rows = []
+    for fold in selected_folds:
+        selected_reward = selected_rewards[fold.fold]
+        selected_buffer = selected_buffers[fold.fold]
+        frozen_candidate = f"{selected_reward}__{selected_buffer}"
+        for seed in selected_seeds:
+            result = tester(
+                fold=fold.fold, seed=seed, candidate=frozen_candidate,
+                reward_variant=selected_reward, buffer_variant=selected_buffer,
+                buffer_config=BUFFER_CONFIGS[selected_buffer], train_range=fold.train,
+                val_range=fold.val, test_range=fold.test, cfg=cfg,
+                artifact_dir=test_root / f"fold{fold.fold}" / frozen_candidate / f"seed{seed}",
+                features_df=features_df, market_state_df=index_df,
+            )
+            row = {"fold": fold.fold, "seed": seed, "candidate": frozen_candidate,
+                   "reward_variant": selected_reward, "buffer_variant": selected_buffer, **result}
+            test_rows.append(row)
+            _write(test_root / f"fold{fold.fold}" / frozen_candidate / f"seed{seed}.json", row)
+
+    summary = {
+        "run_id": run_id, "publishable": False if smoke else False,
+        "selected_reward": selected_rewards if not smoke else selected_rewards[selected_folds[0].fold],
+        "selected_buffer": selected_buffers if not smoke else selected_buffers[selected_folds[0].fold],
+        "frozen_candidate": {
+            str(fold.fold): f"{selected_rewards[fold.fold]}__{selected_buffers[fold.fold]}"
+            for fold in selected_folds
+        }, "validation": validation_rows + buffer_rows,
+        "test": test_rows,
+    }
+    _write(run_root / "summary.json", summary)
+    return summary
+
+
+def _default_trainer(**kwargs) -> dict:
+    """Small production adapter; tests can replace it through injection."""
+    if kwargs.get("features_df") is None or kwargs.get("market_state_df") is None:
+        raise ValueError("default trainer requires features_df and market_state_df")
+    from scripts.env import PortfolioEnv
+    from scripts.metrics import sharpe
+    from scripts.train import train_ppo, select_device
+
+    cfg = dict(kwargs.get("cfg") or {})
+    cfg["reward_variant"] = kwargs["reward_variant"]
+    cfg.update(kwargs["buffer_config"])
+    env = PortfolioEnv(kwargs["features_df"], kwargs["market_state_df"], cfg,
+                       *kwargs["train_range"])
+    model = train_ppo(env, total_timesteps=kwargs["timesteps"], seed=kwargs["seed"],
+                      device=select_device(cfg.get("train_device", "auto")))
+    val_env = PortfolioEnv(kwargs["features_df"], kwargs["market_state_df"], cfg,
+                           *kwargs["val_range"])
+    obs, _ = val_env.reset(seed=kwargs["seed"])
+    returns = []
+    done = False
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, _, terminated, truncated, info = val_env.step(action)
+        returns.extend(info["daily_net_rets"])
+        done = terminated or truncated
+    return {"val_sharpe": float(sharpe(returns))}
+
+
+def _default_tester(**kwargs) -> dict:
+    test_kwargs = dict(kwargs)
+    test_kwargs["val_range"] = kwargs["test_range"]
+    result = _default_trainer(**test_kwargs)
+    return {"test_sharpe": result["val_sharpe"]}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--full", action="store_true")
+    parser.add_argument("--output-root", default="artifacts/walk_forward")
+    parser.add_argument("--timesteps", type=int, default=None)
+    args = parser.parse_args()
+    if args.smoke and args.full:
+        parser.error("choose only one of --smoke or --full")
+    if not args.smoke and not args.full:
+        parser.error("one of --smoke or --full is required")
+    root = pathlib.Path(__file__).resolve().parent.parent
+    features_path = root / "data" / "features.parquet"
+    market_state_path = root / "data" / "market_state.parquet"
+    if not features_path.exists() or not market_state_path.exists():
+        parser.error(f"required input missing: {features_path} and {market_state_path}")
+    import pandas as pd
+    from scripts.config import get_config
+    features = pd.read_parquet(features_path)
+    market_state = pd.read_parquet(market_state_path)
+    run_walk_forward(
+        folds=default_folds(), output_root=root / args.output_root,
+        smoke=args.smoke, trainer=_default_trainer, tester=_default_tester,
+        features_df=features, index_df=market_state, cfg=get_config(),
+        timesteps=args.timesteps or (128 if args.smoke else 100_000),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    main()
