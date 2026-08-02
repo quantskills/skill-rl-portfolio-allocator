@@ -4,10 +4,14 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import sys
 import uuid
 from collections import defaultdict
 from statistics import median
 from typing import Callable
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from scripts.check_data_coverage import Fold, check_folds, default_folds
 
@@ -160,6 +164,20 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
         }, "validation": validation_rows + buffer_rows,
         "test": test_rows,
     }
+    method_by_fold = {
+        str(fold.fold): {
+            "frozen_candidate": f"{selected_rewards[fold.fold]}__{selected_buffers[fold.fold]}",
+            "schema_version": (cfg or {}).get("schema_version", "state-v1"),
+            "reward_variant": selected_rewards[fold.fold],
+            "buffer_variant": selected_buffers[fold.fold],
+            "buffer_config": BUFFER_CONFIGS[selected_buffers[fold.fold]],
+            "training_budget": timesteps or (128 if smoke else 100_000),
+        }
+        for fold in selected_folds
+    }
+    summary["method_by_fold"] = method_by_fold
+    if smoke:
+        summary["frozen_method"] = method_by_fold[str(selected_folds[0].fold)]
     _write(run_root / "summary.json", summary)
     return summary
 

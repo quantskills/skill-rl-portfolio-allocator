@@ -4,8 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import sys
 import numpy as np
 import pandas as pd
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from scripts.config import get_config
 from scripts.backtest import run_backtest
@@ -50,6 +54,10 @@ STRESS_SEGMENTS = [
 
 def load_frozen_method(path: str) -> dict:
     method = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    if "frozen_method" in method:
+        method = method["frozen_method"]
+    elif "method_by_fold" in method:
+        method = method["method_by_fold"][sorted(method["method_by_fold"])[-1]]
     if not method.get("frozen_candidate"):
         raise ValueError("method artifact must contain frozen_candidate")
     return method
@@ -146,10 +154,6 @@ def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
 
 
 def main() -> None:
-    cfg = get_config()
-    root = pathlib.Path(__file__).resolve().parent.parent
-    feats = pd.read_parquet(root / "data" / "features.parquet")
-    market_state = pd.read_parquet(root / "data" / "market_state.parquet")
     p = argparse.ArgumentParser()
     p.add_argument("--timesteps", type=int, default=100_000)
     p.add_argument("--method", default=None,
@@ -157,6 +161,10 @@ def main() -> None:
     p.add_argument("--report", default=None,
                    help="optional JSON path for the separate stress report")
     args = p.parse_args()
+    cfg = get_config()
+    root = pathlib.Path(__file__).resolve().parent.parent
+    feats = pd.read_parquet(root / "data" / "features.parquet")
+    market_state = pd.read_parquet(root / "data" / "market_state.parquet")
     method = load_frozen_method(args.method) if args.method else None
     results = run_all_stress(feats, market_state, cfg, timesteps=args.timesteps, method=method)
     if args.report:

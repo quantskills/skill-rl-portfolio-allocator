@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -11,7 +13,7 @@ from scripts.walk_forward import (
     run_walk_forward,
     select_candidate_on_validation,
 )
-from scripts.stress_test import apply_frozen_method
+from scripts.stress_test import apply_frozen_method, load_frozen_method
 
 
 def test_constants_are_closed_and_buffer_configs_are_exact():
@@ -107,6 +109,47 @@ def test_frozen_method_applies_reward_buffer_schema_and_budget():
     assert applied_cfg["long_exit"] == 40
     assert applied_cfg["schema_version"] == "state-v1"
     assert budget == 777
+
+
+def test_direct_script_help_bootstraps_package_imports():
+    for script in ("scripts/walk_forward.py", "scripts/stress_test.py"):
+        completed = subprocess.run(
+            [sys.executable, script, "--help"], capture_output=True, text=True
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "usage" in completed.stdout.lower()
+
+
+def test_summary_contains_stress_readable_frozen_method(tmp_path):
+    def trainer(**kwargs):
+        return {"val_sharpe": 1.0, "checkpoint_path": "/tmp/fake.zip"}
+
+    def tester(**kwargs):
+        return {"test_sharpe": 0.0}
+
+    smoke = run_walk_forward(
+        folds=default_folds(), output_root=tmp_path, smoke=True,
+        trainer=trainer, tester=tester, coverage_checker=lambda: None,
+        cfg={"schema_version": "state-v1"}, timesteps=128,
+    )
+    smoke_method = smoke["frozen_method"]
+    assert smoke_method["schema_version"] == "state-v1"
+    assert smoke_method["reward_variant"] == "none"
+    assert smoke_method["buffer_variant"] == "tight"
+    assert smoke_method["buffer_config"] == BUFFER_CONFIGS["tight"]
+    assert smoke_method["training_budget"] == 128
+    assert json.loads((tmp_path / "smoke" / "summary.json").read_text())["frozen_method"] == smoke_method
+    loaded = load_frozen_method(str(tmp_path / "smoke" / "summary.json"))
+    assert loaded["buffer_variant"] == "tight"
+    assert loaded["training_budget"] == 128
+
+    full = run_walk_forward(
+        folds=default_folds(), output_root=tmp_path, smoke=False,
+        trainer=trainer, tester=tester, coverage_checker=lambda: None,
+        cfg={"schema_version": "state-v1"}, timesteps=256,
+    )
+    assert set(full["method_by_fold"]) == {"1", "2", "3"}
+    assert all(method["training_budget"] == 256 for method in full["method_by_fold"].values())
 
 
 def test_full_runs_use_unique_run_directories_and_write_frozen_test_records(tmp_path):
