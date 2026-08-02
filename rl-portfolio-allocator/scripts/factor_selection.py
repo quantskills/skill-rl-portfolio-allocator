@@ -5,6 +5,11 @@ redundancy control, and artifact writing belong to the following task.
 """
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+import shutil
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -12,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from scripts import costs
+from scripts.factor_catalog import CATALOG_VERSION, FACTOR_CATALOG, catalog_hash
 from scripts.config import get_config
 from scripts.env import extract_settle_holding_period
 from scripts.rebalance import weekly_decision_indices
@@ -22,6 +28,15 @@ class SelectionThresholds:
     min_coverage: float = 0.98
     min_symbols: int = 100
     min_dates: int = 500
+
+
+@dataclass(frozen=True)
+class SelectionResult:
+    selected: tuple[dict, ...]
+    relaxation_log: tuple[dict, ...]
+    final_family_cap: int
+    final_correlation_ceiling: float
+    catalog_hash: str
 
 
 _CORE_COLUMNS = {"trade_date", "symbol", "ret_1d"}
@@ -580,7 +595,7 @@ def percentile_scores(metrics: dict[str, dict[str, Any]]) -> dict[str, float]:
     eligible: dict[str, dict[str, float]] = {}
     for name in sorted(metrics):
         item = metrics[name]
-        if not isinstance(item, dict) or item.get("passed", not item.get("failure_reasons")) is not True:
+        if not isinstance(item, dict) or not _non_relaxable_passed(item):
             continue
         values: dict[str, float] = {}
         valid = True
@@ -619,3 +634,556 @@ def percentile_scores(metrics: dict[str, dict[str, Any]]) -> dict[str, float]:
             - 0.05 * p["tail_loss"][name]
         )
     return scores
+
+
+_CATALOG_BY_NAME = {spec.name: spec for spec in FACTOR_CATALOG}
+_CATALOG_ORDER = {spec.name: index for index, spec in enumerate(FACTOR_CATALOG)}
+_NON_RELAXABLE_FIELDS = ("coverage", "symbols", "dates")
+_GATE_FIELD_ALIASES = (
+    ("mean_ic",),
+    ("icir",),
+    ("sign_consistency",),
+    ("positive_ic_rate", "positive_ic"),
+    ("net_factor_sharpe", "net_sharpe", "weekly_net_sharpe"),
+)
+
+
+def _number(value: Any, field: str, name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} {field} must be finite") from exc
+    if not np.isfinite(result):
+        raise ValueError(f"{name} {field} must be finite")
+    return result
+
+
+def _non_relaxable_passed(item: dict[str, Any]) -> bool:
+    if item.get("passed") is not True:
+        return False
+    if item.get("non_relaxable_passed", True) is False:
+        return False
+    reasons = item.get("failure_reasons")
+    if not isinstance(reasons, (list, tuple)) or reasons:
+        return False
+    checks = {
+        "coverage": (0.98, lambda value, threshold: value >= threshold),
+        "symbols": (100.0, lambda value, threshold: value >= threshold),
+        "dates": (500.0, lambda value, threshold: value >= threshold),
+    }
+    for field in _NON_RELAXABLE_FIELDS:
+        if field not in item:
+            return False
+        try:
+            value = float(item[field])
+        except (TypeError, ValueError):
+            return False
+        threshold, predicate = checks[field]
+        if not np.isfinite(value) or not predicate(value, threshold):
+            return False
+    for aliases in _GATE_FIELD_ALIASES:
+        values = []
+        for field in aliases:
+            if field not in item:
+                continue
+            try:
+                value = float(item[field])
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value):
+                values.append(value)
+        if not values:
+            return False
+    return True
+
+
+def _candidate_metadata(
+    name: str,
+    item: dict[str, Any],
+    insertion_order: int,
+) -> tuple[str, int]:
+    spec = _CATALOG_BY_NAME.get(name)
+    if spec is not None:
+        family = spec.family
+        catalog_order = _CATALOG_ORDER[name]
+        return family, catalog_order
+    family = item.get("family", "unknown")
+    if not isinstance(family, str) or not family:
+        raise ValueError(f"{name} family must be a non-empty string")
+    catalog_order = item.get(
+        "catalog_order",
+        _CATALOG_ORDER.get(name, insertion_order),
+    )
+    try:
+        catalog_order = int(catalog_order)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} catalog_order must be an integer") from exc
+    return family, catalog_order
+
+
+def _net_sharpe(item: dict[str, Any]) -> float:
+    for field in ("net_factor_sharpe", "net_sharpe", "weekly_net_sharpe"):
+        if field in item:
+            return _number(item[field], field, str(item.get("name", "factor")))
+    return 0.0
+
+
+def _selection_candidates(metrics: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(metrics, dict):
+        raise TypeError("metrics must be a dictionary keyed by factor name")
+    scores = percentile_scores(metrics)
+    candidates: list[dict[str, Any]] = []
+    for insertion_order, (name, raw_item) in enumerate(metrics.items()):
+        if not isinstance(name, str) or not isinstance(raw_item, dict):
+            raise ValueError("metrics must map factor names to dictionaries")
+        if not _non_relaxable_passed(raw_item):
+            continue
+        family, catalog_order = _candidate_metadata(name, raw_item, insertion_order)
+        score = scores.get(name)
+        if score is None:
+            continue
+        score = _number(score, "score", name)
+        candidate = dict(raw_item)
+        candidate.update(
+            {
+                "name": name,
+                "family": family,
+                "catalog_order": catalog_order,
+                "score": score,
+                "direction": int(raw_item.get("direction", 1)),
+                "catalog_version": CATALOG_VERSION,
+            }
+        )
+        candidates.append(candidate)
+    candidates.sort(key=lambda item: (-item["score"], item["catalog_order"], item["name"]))
+    return candidates
+
+
+def _correlation_value(source: Any, left: str, right: str) -> float:
+    if source is None:
+        raise ValueError(f"correlation matrix missing pair: {left}/{right}")
+    value: Any = None
+    found = False
+    if isinstance(source, pd.DataFrame):
+        if (
+            left in source.index
+            and right in source.index
+            and left in source.columns
+            and right in source.columns
+        ):
+            value = source.loc[left, right]
+            found = True
+    elif isinstance(source, dict):
+        if (left, right) in source:
+            value, found = source[(left, right)], True
+        elif left in source and isinstance(source[left], dict) and right in source[left]:
+            value, found = source[left][right], True
+        elif right in source and isinstance(source[right], dict) and left in source[right]:
+            value, found = source[right][left], True
+    else:
+        try:
+            value = source.loc[left, right]
+            found = True
+        except (AttributeError, KeyError, IndexError, TypeError):
+            pass
+    if not found:
+        raise ValueError(f"correlation matrix missing pair: {left}/{right}")
+    if isinstance(value, dict):
+        value = value.get("median", value.get("value"))
+    if isinstance(value, (list, tuple, np.ndarray, pd.Series, pd.Index)):
+        values = pd.to_numeric(pd.Series(value), errors="coerce").to_numpy(dtype=float)
+        if not len(values) or not np.isfinite(values).all():
+            raise ValueError(f"correlation out of range: {left}/{right}")
+        if np.any(np.abs(values) > 1.0):
+            raise ValueError(f"correlation out of range: {left}/{right}")
+        value = float(np.median(values))
+    try:
+        result = _number(value, "correlation", f"{left}/{right}")
+    except ValueError as exc:
+        raise ValueError(f"correlation out of range: {left}/{right}") from exc
+    if abs(result) > 1.0:
+        raise ValueError(f"correlation out of range: {left}/{right}")
+    return result
+
+
+def _redundancy(
+    left: str,
+    right: str,
+    return_corr: Any,
+    cross_section_corr: Any,
+) -> float:
+    return max(
+        abs(_correlation_value(return_corr, left, right)),
+        abs(_correlation_value(cross_section_corr, left, right)),
+    )
+
+
+def _validate_correlation_matrices(
+    names: list[str],
+    return_corr: Any,
+    cross_section_corr: Any,
+) -> None:
+    """Require complete finite off-diagonal redundancy inputs for candidates."""
+    for name in names:
+        _correlation_value(return_corr, name, name)
+        _correlation_value(cross_section_corr, name, name)
+    for index, left in enumerate(names):
+        for right in names[index + 1 :]:
+            _correlation_value(return_corr, left, right)
+            _correlation_value(cross_section_corr, left, right)
+
+
+def _selection_gate(
+    item: dict[str, Any],
+    mean_ic: float,
+    icir: float,
+    sign_consistency: float,
+    positive_ic: float,
+    net_sharpe_floor: float,
+    strict_net_sharpe: bool = False,
+) -> bool:
+    try:
+        positive_ic_value = item.get("positive_ic_rate", item.get("positive_ic", 0.0))
+        sign_value = item.get("sign_consistency", item.get("yearly_sign_consistency", 0.0))
+        net_sharpe = _net_sharpe(item)
+        net_sharpe_passed = (
+            net_sharpe > net_sharpe_floor
+            if strict_net_sharpe
+            else net_sharpe >= net_sharpe_floor
+        )
+        return (
+            abs(_number(item.get("mean_ic", 0.0), "mean_ic", item["name"])) >= mean_ic
+            and abs(_number(item.get("icir", 0.0), "icir", item["name"])) >= icir
+            and _number(sign_value, "sign_consistency", item["name"]) >= sign_consistency
+            and _number(positive_ic_value, "positive_ic_rate", item["name"]) >= positive_ic
+            and net_sharpe_passed
+        )
+    except ValueError:
+        return False
+
+
+def _admission(
+    item: dict[str, Any],
+    selected: list[dict[str, Any]],
+    family_cap: int | None,
+    correlation_ceiling: float | None,
+    return_corr: Any,
+    cross_section_corr: Any,
+) -> bool:
+    if family_cap is not None:
+        family_count = sum(previous["family"] == item["family"] for previous in selected)
+        if family_count >= family_cap:
+            return False
+    if correlation_ceiling is not None:
+        for previous in selected:
+            if _redundancy(item["name"], previous["name"], return_corr, cross_section_corr) > correlation_ceiling:
+                return False
+    else:
+        # Level 4 removes the redundancy ceiling, but correlation inputs are
+        # still a non-relaxable part of the selected-pair audit trail.
+        for previous in selected:
+            _redundancy(item["name"], previous["name"], return_corr, cross_section_corr)
+    return True
+
+
+def select_factors(
+    metrics: dict[str, dict[str, Any]],
+    return_corr: Any = None,
+    cross_section_corr: Any = None,
+    target_count: int = 20,
+) -> SelectionResult:
+    """Select a deterministic, diverse factor set inside one training fold."""
+    if isinstance(target_count, bool) or not isinstance(target_count, int) or target_count <= 0:
+        raise ValueError("target_count must be a positive integer")
+    candidates = _selection_candidates(metrics)
+    if len(candidates) < target_count:
+        raise ValueError(f"fewer than {target_count} hard-valid factors")
+    _validate_correlation_matrices(
+        [candidate["name"] for candidate in candidates],
+        return_corr,
+        cross_section_corr,
+    )
+
+    levels = (
+        {"level": 0, "mean_ic": 0.015, "icir": 0.10, "sign_consistency": 0.60, "positive_ic_rate": 0.52, "net_sharpe": 0.0, "family_cap": 3, "correlation_ceiling": 0.80},
+        {"level": 1, "mean_ic": 0.010, "icir": 0.07, "sign_consistency": 0.55, "positive_ic_rate": 0.52, "net_sharpe": -0.10, "family_cap": 3, "correlation_ceiling": 0.80},
+        {"level": 2, "mean_ic": 0.010, "icir": 0.07, "sign_consistency": 0.55, "positive_ic_rate": 0.52, "net_sharpe": -0.10, "family_cap": 4, "correlation_ceiling": 0.85},
+        {"level": 3, "mean_ic": 0.005, "icir": 0.07, "sign_consistency": 0.55, "positive_ic_rate": 0.52, "net_sharpe": -0.10, "family_cap": 4, "correlation_ceiling": 0.90},
+        {"level": 4, "mean_ic": None, "icir": None, "sign_consistency": None, "positive_ic_rate": None, "net_sharpe": None, "family_cap": None, "correlation_ceiling": None},
+    )
+    selected: list[dict[str, Any]] = []
+    selected_names: set[str] = set()
+    relaxation_log: list[dict[str, Any]] = []
+    final_cap = 3
+    final_ceiling = 0.80
+
+    for threshold in levels:
+        if len(selected) >= target_count:
+            break
+        level = threshold["level"]
+        admitted: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if candidate["name"] in selected_names:
+                continue
+            if level < 4 and not _selection_gate(
+                candidate,
+                threshold["mean_ic"],
+                threshold["icir"],
+                threshold["sign_consistency"],
+                threshold["positive_ic_rate"],
+                threshold["net_sharpe"],
+                strict_net_sharpe=level == 0,
+            ):
+                continue
+            if not _admission(
+                candidate,
+                selected,
+                threshold["family_cap"],
+                threshold["correlation_ceiling"],
+                return_corr,
+                cross_section_corr,
+            ):
+                continue
+            selected_item = dict(candidate)
+            selected_item["selection_level"] = level
+            selected.append(selected_item)
+            selected_names.add(candidate["name"])
+            admitted.append({
+                "name": candidate["name"],
+                "family": candidate["family"],
+                "score": candidate["score"],
+            })
+            if len(selected) >= target_count:
+                break
+        if threshold["family_cap"] is None:
+            final_cap = target_count
+        else:
+            final_cap = threshold["family_cap"]
+        if threshold["correlation_ceiling"] is None:
+            final_ceiling = 1.0
+        else:
+            final_ceiling = threshold["correlation_ceiling"]
+        relaxation_log.append({
+            "level": level,
+            "thresholds": dict(threshold),
+            "admitted": admitted,
+            "selected_count": len(selected),
+            "no_family_or_correlation_cap": level == 4,
+        })
+
+    if len(selected) != target_count:
+        raise ValueError(
+            f"selection failed: only {len(selected)} of {target_count} factors admitted "
+            "after relaxation"
+        )
+    selected.sort(key=lambda item: (-item["score"], item["catalog_order"], item["name"]))
+    return SelectionResult(
+        selected=tuple(selected),
+        relaxation_log=tuple(relaxation_log),
+        final_family_cap=int(final_cap),
+        final_correlation_ceiling=float(final_ceiling),
+        catalog_hash=catalog_hash(FACTOR_CATALOG),
+    )
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        result = float(value)
+        if not np.isfinite(result):
+            raise ValueError("artifact values must be finite")
+        return result
+    if isinstance(value, (pd.Timestamp,)):
+        return value.isoformat()
+    if value is pd.NA:
+        raise ValueError("artifact values must be finite")
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, np.ndarray, pd.Series, pd.Index)):
+        return [_json_ready(item) for item in list(value)]
+    if isinstance(value, (str, bool, int)) or value is None:
+        return value
+    return str(value)
+
+
+def _json_ready_canonical(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _json_ready_canonical(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple, np.ndarray, pd.Series, pd.Index)):
+        return [_json_ready_canonical(item) for item in list(value)]
+    return _json_ready(value)
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    ready = _json_ready(payload)
+    encoded = json.dumps(ready, ensure_ascii=False, indent=2, sort_keys=False, allow_nan=False)
+    path.write_text(encoded + "\n", encoding="utf-8")
+
+
+def _correlation_sources(correlations: Any) -> tuple[Any, Any]:
+    if isinstance(correlations, dict):
+        if "return_corr" in correlations or "cross_section_corr" in correlations:
+            return correlations.get("return_corr"), correlations.get("cross_section_corr")
+        return correlations, None
+    if isinstance(correlations, (tuple, list)) and len(correlations) == 2:
+        return correlations[0], correlations[1]
+    raise ValueError("correlations must provide return_corr and cross_section_corr")
+
+
+def _scalar_candidate_row(item: dict[str, Any], selected_names: set[str], order: int) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "name": item["name"],
+        "family": item["family"],
+        "catalog_order": item["catalog_order"],
+        "direction": item["direction"],
+        "score": item["score"],
+        "selected": item["name"] in selected_names,
+        "selection_order": order if item["name"] in selected_names else None,
+    }
+    for key, value in item.items():
+        if key in row or isinstance(value, (dict, list, tuple, np.ndarray)):
+            continue
+        if isinstance(value, (str, bool, int, float, np.integer, np.floating)):
+            row[key] = _json_ready(value)
+    return row
+
+
+def _correlation_frame(names: list[str], return_corr: Any, cross_section_corr: Any) -> pd.DataFrame:
+    rows = []
+    for left in names:
+        for right in names:
+            ret_value = _correlation_value(return_corr, left, right) if left != right else 1.0
+            cross_value = _correlation_value(cross_section_corr, left, right) if left != right else 1.0
+            rows.append({
+                "factor_a": left,
+                "factor_b": right,
+                "return_corr": ret_value,
+                "cross_section_corr": cross_value,
+                "redundancy_corr": max(abs(ret_value), abs(cross_value)),
+            })
+    return pd.DataFrame(rows)
+
+
+def write_selection_artifacts(
+    result: SelectionResult,
+    metrics: dict[str, dict[str, Any]],
+    correlations: Any,
+    output_dir: str | Path,
+    fold: int | str,
+    train_range: Any,
+) -> None:
+    """Write the complete selection bundle with no partially written output."""
+    if not isinstance(result, SelectionResult):
+        raise TypeError("result must be a SelectionResult")
+    expected_hash = catalog_hash(FACTOR_CATALOG)
+    if result.catalog_hash != expected_hash:
+        raise ValueError("catalog hash mismatch")
+    return_corr, cross_section_corr = _correlation_sources(correlations)
+    ready_metrics = {
+        name: _json_ready_canonical(metrics[name])
+        for name in sorted(metrics)
+    }
+    selected = [_json_ready(item) for item in result.selected]
+    relaxation_log = [_json_ready(item) for item in result.relaxation_log]
+    root = Path(output_dir)
+    if root.exists() and not root.is_dir():
+        raise ValueError("output_dir must be a directory")
+    root.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{root.name}.", dir=str(root.parent)))
+    try:
+        all_candidates = _selection_candidates(metrics)
+        selected_names = {item["name"] for item in result.selected}
+        selected_order = {item["name"]: index for index, item in enumerate(result.selected)}
+        names = [item["name"] for item in all_candidates]
+        _validate_correlation_matrices(names, return_corr, cross_section_corr)
+        candidates_frame = pd.DataFrame([
+            _scalar_candidate_row(item, selected_names, selected_order.get(item["name"], 0))
+            for item in all_candidates
+        ])
+        candidates_frame.to_parquet(stage / "candidates.parquet", index=False)
+        correlation_frame = _correlation_frame(names, return_corr, cross_section_corr)
+        correlation_frame.to_parquet(stage / "correlation_matrix.parquet", index=False)
+        catalog_digest = result.catalog_hash
+        metadata = {
+            "schema_version": "factor-selection-v1",
+            "catalog_version": CATALOG_VERSION,
+            "catalog_hash": catalog_digest,
+            "fold": fold,
+            "train_range": train_range,
+        }
+        _write_json(stage / "selected_factors.json", {
+            **metadata,
+            "selected_factors": selected,
+            "final_family_cap": result.final_family_cap,
+            "final_correlation_ceiling": result.final_correlation_ceiling,
+            "level4_no_family_or_correlation_cap": any(
+                event["level"] == 4 and event["no_family_or_correlation_cap"]
+                for event in result.relaxation_log
+            ),
+        })
+        _write_json(stage / "factor_metrics.json", {**metadata, "metrics": ready_metrics})
+        _write_json(stage / "relaxation_log.json", {**metadata, "events": relaxation_log})
+        _write_json(stage / "selection_report.json", {
+            **metadata,
+            "schema": {
+                "selected_factors": "ordered list of factor records",
+                "candidates": "candidates.parquet",
+                "correlations": "correlation_matrix.parquet",
+            },
+            "candidate_count": len(all_candidates),
+            "selected_count": len(result.selected),
+            "selected_names": [item["name"] for item in result.selected],
+            "final_family_cap": result.final_family_cap,
+            "final_correlation_ceiling": result.final_correlation_ceiling,
+            "relaxation_levels": [item["level"] for item in result.relaxation_log],
+            "level4_no_family_or_correlation_cap": any(
+                event["level"] == 4 and event["no_family_or_correlation_cap"]
+                for event in result.relaxation_log
+            ),
+        })
+        for path in stage.iterdir():
+            if path.suffix == ".json":
+                json.loads(path.read_text(encoding="utf-8"))
+        if root.exists():
+            backup = root.with_name(f".{root.name}.previous")
+            if backup.exists():
+                try:
+                    shutil.rmtree(backup)
+                except Exception:
+                    file_descriptor, fallback_name = tempfile.mkstemp(
+                        prefix=f".{root.name}.previous.",
+                        dir=str(root.parent),
+                    )
+                    os.close(file_descriptor)
+                    os.unlink(fallback_name)
+                    backup = Path(fallback_name)
+            os.replace(root, backup)
+            try:
+                os.replace(stage, root)
+            except Exception:
+                os.replace(backup, root)
+                raise
+            try:
+                shutil.rmtree(backup)
+            except Exception:
+                pass
+        else:
+            os.replace(stage, root)
+    except Exception:
+        if stage.exists():
+            shutil.rmtree(stage)
+        raise
+
+
+__all__ = [
+    "SelectionResult",
+    "SelectionThresholds",
+    "compute_factor_metrics",
+    "percentile_scores",
+    "select_factors",
+    "write_selection_artifacts",
+]
