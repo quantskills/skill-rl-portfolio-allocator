@@ -55,6 +55,22 @@ def load_frozen_method(path: str) -> dict:
     return method
 
 
+def apply_frozen_method(cfg: dict, method: dict, default_budget: int) -> tuple[dict, int]:
+    """Apply frozen training/evaluation metadata before running stress segments."""
+    applied = dict(cfg)
+    for key in ("reward_variant", "buffer_variant", "schema_version"):
+        if key in method:
+            applied[key] = method[key]
+    buffer_config = method.get("buffer_config")
+    if buffer_config is None:
+        raise ValueError("frozen method artifact must contain buffer_config")
+    applied.update(buffer_config)
+    budget = int(method.get("training_budget", default_budget))
+    if budget <= 0:
+        raise ValueError("training_budget must be positive")
+    return applied, budget
+
+
 def _has_enough(feats: pd.DataFrame, market_state: pd.DataFrame,
                 train_end: str, min_years: int) -> tuple[bool, str, str]:
     d = pd.to_datetime(feats["trade_date"])
@@ -92,6 +108,8 @@ def _core_metrics(features_df: pd.DataFrame, cfg: dict,
 
 def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
                    cfg: dict, timesteps: int = 100_000, method: dict | None = None) -> list:
+    if method is not None:
+        cfg, timesteps = apply_frozen_method(cfg, method, timesteps)
     out = []
     for seg in STRESS_SEGMENTS:
         ok, data_start, reason = _has_enough(
@@ -117,6 +135,12 @@ def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
             # deliberately absent from the stress path.
             record["frozen_candidate"] = method["frozen_candidate"]
             record["report_type"] = "frozen_method_stress"
+            record["method_config"] = {
+                "reward_variant": cfg.get("reward_variant"),
+                "buffer_variant": cfg.get("buffer_variant"),
+                "schema_version": cfg.get("schema_version"),
+                "training_budget": timesteps,
+            }
         out.append(record)
     return out
 

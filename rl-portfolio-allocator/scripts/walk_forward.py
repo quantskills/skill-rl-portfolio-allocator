@@ -72,10 +72,11 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
     selected_seeds = (0,) if smoke else SEEDS
     root = pathlib.Path(output_root)
     run_id = "smoke" if smoke else uuid.uuid4().hex
-    run_root = root if smoke else root / run_id
+    run_root = root / "smoke" if smoke else root / run_id
     validation_root = run_root / "validation"
     test_root = run_root / "test"
     validation_rows = []
+    reward_results = {}
     selected_rewards = {}
 
     # Phase 1: default rank buffer, reward ablation. Tests are impossible here.
@@ -91,7 +92,9 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
                     features_df=features_df, market_state_df=index_df,
                 )
                 row = {"fold": fold.fold, "seed": seed, "candidate": reward,
-                       "val_sharpe": float(result["val_sharpe"]), "stage": "reward_ablation"}
+                       "val_sharpe": float(result["val_sharpe"]), "stage": "reward_ablation",
+                       "trainer_result": _jsonable(result)}
+                reward_results[(fold.fold, seed, reward)] = result
                 validation_rows.append(row)
                 _write(validation_root / f"fold{fold.fold}" / "reward" / f"{reward}_seed{seed}.json", row)
         selected_rewards[fold.fold] = select_candidate_on_validation(
@@ -100,6 +103,7 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
 
     # Phase 2: buffer ablation with the reward choice frozen by validation only.
     buffer_rows = []
+    buffer_results = {}
     selected_buffers = {}
     for fold in selected_folds:
         selected_reward = selected_rewards[fold.fold]
@@ -115,7 +119,8 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
                 )
                 row = {"fold": fold.fold, "seed": seed, "candidate": buffer,
                        "val_sharpe": float(result["val_sharpe"]), "stage": "buffer_ablation",
-                       "reward_variant": selected_reward}
+                       "reward_variant": selected_reward, "trainer_result": _jsonable(result)}
+                buffer_results[(fold.fold, seed, buffer)] = result
                 buffer_rows.append(row)
                 _write(validation_root / f"fold{fold.fold}" / "buffer" / f"{buffer}_seed{seed}.json", row)
         selected_buffers[fold.fold] = select_candidate_on_validation(
@@ -129,12 +134,15 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
         selected_buffer = selected_buffers[fold.fold]
         frozen_candidate = f"{selected_reward}__{selected_buffer}"
         for seed in selected_seeds:
+            validation_result = buffer_results[(fold.fold, seed, selected_buffer)]
+            checkpoint_path = validation_result.get("checkpoint_path")
             result = tester(
                 fold=fold.fold, seed=seed, candidate=frozen_candidate,
                 reward_variant=selected_reward, buffer_variant=selected_buffer,
                 buffer_config=BUFFER_CONFIGS[selected_buffer], train_range=fold.train,
                 val_range=fold.val, test_range=fold.test, cfg=cfg,
                 artifact_dir=test_root / f"fold{fold.fold}" / frozen_candidate / f"seed{seed}",
+                validation_result=validation_result, checkpoint_path=checkpoint_path,
                 features_df=features_df, market_state_df=index_df,
             )
             row = {"fold": fold.fold, "seed": seed, "candidate": frozen_candidate,
@@ -169,7 +177,10 @@ def _default_trainer(**kwargs) -> dict:
     cfg.update(kwargs["buffer_config"])
     env = PortfolioEnv(kwargs["features_df"], kwargs["market_state_df"], cfg,
                        *kwargs["train_range"])
+    artifact_dir = pathlib.Path(kwargs["artifact_dir"])
+    checkpoint_path = artifact_dir / "best.zip"
     model = train_ppo(env, total_timesteps=kwargs["timesteps"], seed=kwargs["seed"],
+                      save_path=str(checkpoint_path),
                       device=select_device(cfg.get("train_device", "auto")))
     val_env = PortfolioEnv(kwargs["features_df"], kwargs["market_state_df"], cfg,
                            *kwargs["val_range"])
@@ -181,14 +192,34 @@ def _default_trainer(**kwargs) -> dict:
         obs, _, terminated, truncated, info = val_env.step(action)
         returns.extend(info["daily_net_rets"])
         done = terminated or truncated
-    return {"val_sharpe": float(sharpe(returns))}
+    if not checkpoint_path.exists():
+        raise ValueError(f"default trainer did not produce checkpoint: {checkpoint_path}")
+    return {"val_sharpe": float(sharpe(returns)), "checkpoint_path": str(checkpoint_path),
+            "schema_version": cfg.get("schema_version"), "training_budget": kwargs["timesteps"]}
 
 
 def _default_tester(**kwargs) -> dict:
-    test_kwargs = dict(kwargs)
-    test_kwargs["val_range"] = kwargs["test_range"]
-    result = _default_trainer(**test_kwargs)
-    return {"test_sharpe": result["val_sharpe"]}
+    checkpoint_path = kwargs.get("checkpoint_path")
+    if not checkpoint_path or not pathlib.Path(checkpoint_path).exists():
+        raise ValueError("frozen validation checkpoint is required; tester will not retrain")
+    from scripts.env import PortfolioEnv
+    from scripts.metrics import sharpe
+    from scripts.train import load_ppo
+    cfg = dict(kwargs.get("cfg") or {})
+    cfg["reward_variant"] = kwargs["reward_variant"]
+    cfg.update(kwargs["buffer_config"])
+    env = PortfolioEnv(kwargs["features_df"], kwargs["market_state_df"], cfg,
+                       *kwargs["test_range"])
+    model = load_ppo(str(checkpoint_path), env)
+    obs, _ = env.reset(seed=kwargs["seed"])
+    returns = []
+    done = False
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, _, terminated, truncated, info = env.step(action)
+        returns.extend(info["daily_net_rets"])
+        done = terminated or truncated
+    return {"test_sharpe": float(sharpe(returns))}
 
 
 def main() -> int:

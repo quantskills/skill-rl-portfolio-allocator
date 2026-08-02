@@ -11,6 +11,7 @@ from scripts.walk_forward import (
     run_walk_forward,
     select_candidate_on_validation,
 )
+from scripts.stress_test import apply_frozen_method
 
 
 def test_constants_are_closed_and_buffer_configs_are_exact():
@@ -66,8 +67,46 @@ def test_walk_forward_orders_validation_then_frozen_tests_once(tmp_path):
     assert all(event[0] == "train" for event in events[:first_test])
     assert all(event[2] == "low__tight" for event in events if event[0] == "test")
     assert all(events.count(event) == 1 for event in events if event[0] == "test")
-    assert (tmp_path / "summary.json").exists()
-    assert json.loads((tmp_path / "summary.json").read_text())["publishable"] is False
+    assert (tmp_path / "smoke" / "summary.json").exists()
+    assert json.loads((tmp_path / "smoke" / "summary.json").read_text())["publishable"] is False
+
+
+def test_tester_receives_saved_validation_result_and_checkpoint(tmp_path):
+    received = []
+
+    def trainer(**kwargs):
+        checkpoint = kwargs["artifact_dir"] / "best.zip"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text("fake")
+        return {"val_sharpe": 1.0, "checkpoint_path": str(checkpoint), "best": True}
+
+    def tester(**kwargs):
+        received.append(kwargs)
+        return {"test_sharpe": 0.0}
+
+    run_walk_forward(
+        folds=default_folds(), output_root=tmp_path, smoke=True,
+        trainer=trainer, tester=tester, coverage_checker=lambda: None,
+    )
+    assert received
+    assert received[0]["checkpoint_path"].endswith("best.zip")
+    assert received[0]["validation_result"]["best"] is True
+    assert received[0]["validation_result"]["checkpoint_path"] == received[0]["checkpoint_path"]
+
+
+def test_frozen_method_applies_reward_buffer_schema_and_budget():
+    cfg = {"reward_variant": "none", "schema_version": "old", "long_entry": 1}
+    method = {
+        "reward_variant": "medium", "buffer_variant": "tight",
+        "buffer_config": {"long_entry": 30, "long_exit": 40, "short_entry": 15, "short_exit": 25},
+        "schema_version": "state-v1", "training_budget": 777,
+    }
+    applied_cfg, budget = apply_frozen_method(cfg, method, 100)
+    assert applied_cfg["reward_variant"] == "medium"
+    assert applied_cfg["buffer_variant"] == "tight"
+    assert applied_cfg["long_exit"] == 40
+    assert applied_cfg["schema_version"] == "state-v1"
+    assert budget == 777
 
 
 def test_full_runs_use_unique_run_directories_and_write_frozen_test_records(tmp_path):
