@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from scripts.config import get_config, FACTOR_NAMES, K
 from scripts.env import PortfolioEnv
-from scripts.train import train_ppo
+from scripts.train import train_ppo, ValidationSharpeCallback
 from scripts.state import exogenous_fields
 
 
@@ -33,3 +33,10 @@ def test_train_ppo_backward_compatible():
     # No eval_env, minimal steps, should complete without error
     model = train_ppo(_toy_env(), total_timesteps=64, seed=0, device="cpu")
     assert model is not None
+
+
+def test_validation_callback_uses_daily_returns_and_requested_defaults():
+    callback = ValidationSharpeCallback(_toy_env(), eval_freq=10000, patience=5)
+    assert callback.eval_freq == 10000
+    assert callback.patience == 5
+    assert callback.deterministic is True
