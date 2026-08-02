@@ -84,6 +84,28 @@ def _invoke_trainer(trainer: Callable, **kwargs) -> dict:
     return result
 
 
+def aggregate_research_summary(test_rows, total_folds: int) -> dict:
+    """Aggregate supplied per-test metrics without inventing missing evidence."""
+    def median_field(name):
+        values = [float(row[name]) for row in test_rows if row.get(name) is not None]
+        return median(values) if values else None
+    positive = [row for row in test_rows if row.get("excess_return") is not None and row["excess_return"] > 0]
+    return {
+        "combined_oos_arr": median_field("oos_arr"),
+        "median_seed_oos_sharpe": median_field("oos_sharpe"),
+        "strongest_baseline_sharpe": median_field("strongest_baseline_sharpe"),
+        "positive_excess_return_folds": len({row.get("fold") for row in positive}),
+        "total_folds": total_folds,
+        "median_seed_excess_return": median_field("excess_return"),
+        "oos_mdd": median_field("oos_mdd"),
+        "strongest_baseline_mdd": median_field("strongest_baseline_mdd"),
+        "annualized_turnover": median_field("annualized_turnover"),
+        "cost_2x_oos_sharpe": median_field("cost_2x_oos_sharpe"),
+        "no_leakage_tests_passed": all(row.get("no_leakage_tests_passed") is True for row in test_rows) if test_rows else None,
+        "state_quality_tests_passed": all(row.get("state_quality_tests_passed") is True for row in test_rows) if test_rows else None,
+    }
+
+
 def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, tester=None,
                      coverage_checker=None, features_df=None, index_df=None,
                      cfg=None, timesteps=None) -> dict:
@@ -204,20 +226,10 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
     summary["method_by_fold"] = method_by_fold
     if smoke:
         summary["frozen_method"] = method_by_fold[str(selected_folds[0].fold)]
-    research_summary = {
-        "combined_oos_arr": next((r.get("combined_oos_arr") for r in test_rows if "combined_oos_arr" in r), None),
-        "median_seed_oos_sharpe": next((r.get("median_seed_oos_sharpe") for r in test_rows if "median_seed_oos_sharpe" in r), None),
-        "strongest_baseline_sharpe": next((r.get("strongest_baseline_sharpe") for r in test_rows if "strongest_baseline_sharpe" in r), None),
-        "positive_excess_return_folds": next((r.get("positive_excess_return_folds") for r in test_rows if "positive_excess_return_folds" in r), None),
-        "total_folds": len(selected_folds),
-        "median_seed_excess_return": next((r.get("median_seed_excess_return") for r in test_rows if "median_seed_excess_return" in r), None),
-        "oos_mdd": next((r.get("oos_mdd") for r in test_rows if "oos_mdd" in r), None),
-        "strongest_baseline_mdd": next((r.get("strongest_baseline_mdd") for r in test_rows if "strongest_baseline_mdd" in r), None),
-        "annualized_turnover": next((r.get("annualized_turnover") for r in test_rows if "annualized_turnover" in r), None),
-        "cost_2x_oos_sharpe": next((r.get("cost_2x_oos_sharpe") for r in test_rows if "cost_2x_oos_sharpe" in r), None),
-        "no_leakage_tests_passed": False if smoke else next((r.get("no_leakage_tests_passed") for r in test_rows if "no_leakage_tests_passed" in r), None),
-        "state_quality_tests_passed": False if smoke else next((r.get("state_quality_tests_passed") for r in test_rows if "state_quality_tests_passed" in r), None),
-    }
+    research_summary = aggregate_research_summary(test_rows, len(selected_folds))
+    if smoke:
+        research_summary["no_leakage_tests_passed"] = False
+        research_summary["state_quality_tests_passed"] = False
     gate_report = evaluate_research_gates(research_summary)
     _write(run_root / "research_summary.json", research_summary)
     _write(run_root / "gates.json", gate_report)
@@ -226,6 +238,7 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
         write_approval(run_root, method, gate_report, run_id, "")
     summary["research_summary"] = research_summary
     summary["gates"] = gate_report
+    summary["publishable"] = bool(not smoke and gate_report["research_ok"])
     _write(run_root / "summary.json", summary)
     return summary
 
