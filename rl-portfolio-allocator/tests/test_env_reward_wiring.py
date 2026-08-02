@@ -23,17 +23,35 @@ def _toy_market_state(dates):
     return pd.DataFrame(0.1, index=pd.DatetimeIndex(dates), columns=exogenous_fields(FACTOR_NAMES))
 
 
-def test_step_info_has_ret_term():
+@pytest.mark.parametrize("variant", ["none", "low", "medium"])
+def test_step_uses_default_reward_without_dsr_parts(variant):
     cfg = get_config()
+    cfg["reward_variant"] = variant
     feats = _toy_features()
     market_state = _toy_market_state(feats["trade_date"].unique())
     env = PortfolioEnv(feats, market_state, cfg, feats["trade_date"].min(), feats["trade_date"].max())
     env.reset(seed=0)
     _, reward, _, _, info = env.step(np.zeros(K, dtype=np.float32))
-    assert "ret_term" in info["reward_parts"]
-    # ret_term should equal reward_ret_weight * net_ret
-    assert abs(info["reward_parts"]["ret_term"]
-               - cfg["reward_ret_weight"] * info["net_ret"]) < 1e-12
+    assert "scaled_net_return" in info["reward_parts"]
+    assert "dsr" not in info["reward_parts"]
+    assert -5.0 <= reward <= 5.0
+
+
+def test_reset_initializes_previous_drawdown_and_toy_rollout_is_bounded():
+    cfg = get_config()
+    feats = _toy_features()
+    market_state = _toy_market_state(feats["trade_date"].unique())
+    env = PortfolioEnv(feats, market_state, cfg, feats["trade_date"].min(), feats["trade_date"].max())
+    env.reset(seed=0)
+    assert env.prev_drawdown == 0.0
+    rewards = []
+    for _ in range(len(env.dates)):
+        _, reward, terminated, _, info = env.step(np.zeros(K, dtype=np.float32))
+        rewards.append(reward)
+        assert "dsr" not in info["reward_parts"]
+        if terminated:
+            break
+    assert all(-5.0 <= reward <= 5.0 for reward in rewards)
 
 
 def test_duplicate_market_state_dates_are_rejected():

@@ -26,15 +26,22 @@ TRADING_DAYS_PER_YEAR: int = 252
 EMA_ALPHA: float = 0.5
 
 DSR_ETA: float = 0.01
-LAMBDA_DRAWDOWN: float = 0.005
-LAMBDA_TURNOVER: float = 0.002
-LAMBDA_CONCENTRATION: float = 0.02
+LAMBDA_DRAWDOWN: float = 0.5
+LAMBDA_TURNOVER: float = 0.05
+LAMBDA_CONCENTRATION: float = 0.5
+REWARD_SCALE: float = 100.0
+REWARD_CLIP: float = 5.0
+HHI_TARGET: float = 0.03
+TURNOVER_BUDGET: float = 0.20
 
 STRATEGY_ID: str = "RLPA"
 DATA_VERSION: str = "real-v1"
 
 
 def get_config() -> dict:
+    reward_variant = os.environ.get("REWARD_VARIANT", "medium")
+    if reward_variant not in {"none", "low", "medium", "legacy_dsr"}:
+        raise ValueError(f"unknown reward variant: {reward_variant}")
     return {
         "factor_names": FACTOR_NAMES,
         "k": K,
@@ -49,9 +56,14 @@ def get_config() -> dict:
         "trading_days_per_year": TRADING_DAYS_PER_YEAR,
         "ema_alpha": EMA_ALPHA,
         "dsr_eta": DSR_ETA,
-        "lambda_drawdown": LAMBDA_DRAWDOWN,
+        "reward_scale": REWARD_SCALE,
+        "reward_clip": REWARD_CLIP,
+        "hhi_target": HHI_TARGET,
+        "turnover_budget": TURNOVER_BUDGET,
+        "lambda_drawdown": 0.5,
         "lambda_turnover": LAMBDA_TURNOVER,
         "lambda_concentration": LAMBDA_CONCENTRATION,
+        "reward_variant": reward_variant,
         "reward_ret_weight": float(os.environ.get("REWARD_RET_WEIGHT", "1.0")),
         "strategy_id": STRATEGY_ID,
         "data_version": DATA_VERSION,

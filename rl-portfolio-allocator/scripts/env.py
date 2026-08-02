@@ -18,7 +18,7 @@ from scripts.costs import total_costs
 from scripts.portfolio import (
     composite_score, select_long_short, target_weights, freeze_suspended
 )
-from scripts.reward import DSRState, hhi, compose_reward
+from scripts.reward import DSRState, hhi, compose_reward, compose_legacy_dsr_reward
 from scripts.state import StateBuilder, exogenous_fields, state_dim
 
 
@@ -110,6 +110,7 @@ class PortfolioEnv(gym.Env):
         self.prev_factor_w = np.zeros(K)
         self.prev_stock_w = np.zeros(self.n)
         self.dsr = DSRState()
+        self.prev_drawdown = 0.0
         panels = {}
         for d, F in self._F_by_date.items():
             panels[d] = pd.DataFrame(F, index=self.symbols, columns=FACTOR_NAMES)
@@ -167,12 +168,15 @@ class PortfolioEnv(gym.Env):
         hhi_v = hhi(target_w)
         dsr_delta = self.dsr.update(net, self.cfg["dsr_eta"], sortino=(self.cfg["reward_type"] == "sortino"))
         drawdown = 0.0 if self.dsr.peak <= 0 else (self.dsr.peak - self.dsr.nav) / self.dsr.peak
-        reward, parts = compose_reward(
-            dsr_delta, drawdown, turnover, hhi_v, self.cfg,
-            net_ret=net,
-            long_notional=long_notional, short_notional=short_notional,
-            long_cap=self.cfg["long_notional"], short_cap=self.cfg["short_notional_cap"]
-        )
+        if self.cfg["reward_variant"] == "legacy_dsr":
+            reward, parts = compose_legacy_dsr_reward(
+                dsr_delta, drawdown, turnover, hhi_v, self.cfg, net,
+                long_notional, short_notional, self.cfg["long_notional"],
+                self.cfg["short_notional_cap"],
+            )
+        else:
+            reward, parts = compose_reward(net, self.prev_drawdown, drawdown, turnover, hhi_v, self.cfg)
+        self.prev_drawdown = drawdown
 
         self.state_builder.portfolio_returns_history.append(net)
         self.state_builder.recent_turnover_history.append(turnover)
