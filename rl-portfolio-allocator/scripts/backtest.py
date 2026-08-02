@@ -112,7 +112,7 @@ def main() -> None:
 
     # Auto-detect train/test split from actual data dates if not explicitly provided
     causal_start, causal_end = effective_range(
-        feats, market_state, cfg["start_date"], cfg["end_date"] or "2099-12-31"
+        feats, market_state, cfg["start_date"], cfg["end_date"] or "2099-12-31", cfg=cfg
     )
     dates = sorted(
         d for d in pd.to_datetime(feats["trade_date"]).unique()

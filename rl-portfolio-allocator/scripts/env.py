@@ -12,7 +12,7 @@ except ImportError:
     import gym
     from gym import spaces
 
-from scripts.config import FACTOR_NAMES, K
+from scripts.config import get_config
 from scripts.action_transform import transform_delta_action
 from scripts.costs import total_costs
 from scripts.portfolio import (
@@ -77,6 +77,10 @@ class PortfolioEnv(gym.Env):
     ):
         super().__init__()
         self.cfg = cfg
+        self.factor_names = tuple(cfg["factor_names"])
+        self.k = len(self.factor_names)
+        if self.k == 0 or cfg.get("k", self.k) != self.k:
+            raise ValueError("factor_names and k must define the same non-empty dimension")
         self.nonlinear_impact = nonlinear_impact
         self.observation_scaler = observation_scaler
         if not isinstance(market_state_df, pd.DataFrame):
@@ -107,7 +111,7 @@ class PortfolioEnv(gym.Env):
         dates = feature_dates.intersection(state_dates)
         if len(dates) == 0:
             raise ValueError("features and market_state have no dates in requested range")
-        missing_fields = set(exogenous_fields(FACTOR_NAMES)) - set(market_state.columns)
+        missing_fields = set(exogenous_fields(self.factor_names)) - set(market_state.columns)
         if missing_fields:
             raise ValueError(f"market_state missing columns: {sorted(missing_fields)}")
         self.features = df
@@ -129,21 +133,21 @@ class PortfolioEnv(gym.Env):
         self._ret_by_date: dict = {}
         self._susp_by_date: dict = {}
         for d, g in df.groupby("trade_date"):
-            F = np.zeros((self.n, K), dtype=float)
+            F = np.zeros((self.n, self.k), dtype=float)
             r = np.zeros(self.n, dtype=float)
             s = np.ones(self.n, dtype=bool)
             for _, row in g.iterrows():
                 i = self._sym_to_idx[row["symbol"]]
-                F[i] = [row[fn] for fn in FACTOR_NAMES]
+                F[i] = [row[fn] for fn in self.factor_names]
                 r[i] = 0.0 if pd.isna(row["ret_1d"]) else float(row["ret_1d"])
                 s[i] = bool(row["is_suspended"])
             self._F_by_date[d] = F
             self._ret_by_date[d] = r
             self._susp_by_date[d] = s
 
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(K,), dtype=np.float32)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.k,), dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(state_dim(FACTOR_NAMES),), dtype=np.float32,
+            low=-np.inf, high=np.inf, shape=(state_dim(self.factor_names),), dtype=np.float32,
         )
         self._reset_internal()
 
@@ -154,13 +158,13 @@ class PortfolioEnv(gym.Env):
 
     def _reset_internal(self):
         self.t = 0
-        self.prev_factor_w = np.zeros(K)
+        self.prev_factor_w = np.zeros(self.k)
         self.prev_stock_w = np.zeros(self.n)
         self.dsr = DSRState()
         self.prev_drawdown = 0.0
         panels = {}
         for d, F in self._F_by_date.items():
-            panels[d] = pd.DataFrame(F, index=self.symbols, columns=FACTOR_NAMES)
+            panels[d] = pd.DataFrame(F, index=self.symbols, columns=self.factor_names)
         self.state_builder = StateBuilder(
             factor_panel_by_date=panels,
             market_state=self.market_state,
@@ -172,7 +176,7 @@ class PortfolioEnv(gym.Env):
         super().reset(seed=seed)
         self._reset_internal()
         obs = self.state_builder.build(
-            self.decision_dates[self.t], self.prev_stock_w, FACTOR_NAMES,
+            self.decision_dates[self.t], self.prev_stock_w, self.factor_names,
             self.prev_factor_w, cash=1.0,
         )
         return self._scale(obs), {}
@@ -242,11 +246,11 @@ class PortfolioEnv(gym.Env):
 
         if not terminated:
             obs = self.state_builder.build(
-                self.decision_dates[self.t], self.prev_stock_w, FACTOR_NAMES,
+                self.decision_dates[self.t], self.prev_stock_w, self.factor_names,
                 self.prev_factor_w, cash=max(0.0, 1.0 - long_notional - short_notional),
             )
         else:
-            obs = np.zeros(state_dim(FACTOR_NAMES), dtype=np.float32)
+            obs = np.zeros(state_dim(self.factor_names), dtype=np.float32)
 
         info = {
             **costs,
@@ -269,15 +273,31 @@ class PortfolioEnv(gym.Env):
         return self._scale(obs), float(reward), terminated, truncated, info
 
 
-def effective_range(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
-                   start, end) -> tuple[pd.Timestamp, pd.Timestamp]:
+def usable_market_state_dates(
+    market_state_df: pd.DataFrame,
+    factor_names=None,
+) -> pd.DatetimeIndex:
     if not isinstance(market_state_df, pd.DataFrame):
         raise TypeError("market_state_df must be an explicit pandas DataFrame")
-    feature_dates = pd.to_datetime(features_df["trade_date"]).unique()
+    state = market_state_df.copy()
     if "trade_date" in market_state_df.columns:
-        state_dates = pd.to_datetime(market_state_df["trade_date"]).unique()
+        state.index = pd.to_datetime(state.pop("trade_date"))
     else:
-        state_dates = pd.to_datetime(market_state_df.index).unique()
+        state.index = pd.to_datetime(state.index)
+    names = tuple(get_config()["factor_names"] if factor_names is None else factor_names)
+    fields = exogenous_fields(names)
+    missing_fields = set(fields) - set(state.columns)
+    if missing_fields:
+        raise ValueError(f"market_state missing columns: {sorted(missing_fields)}")
+    values = state[fields].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    return pd.DatetimeIndex(state.index[np.isfinite(values).all(axis=1)].unique()).sort_values()
+
+
+def effective_range(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
+                   start, end, cfg=None) -> tuple[pd.Timestamp, pd.Timestamp]:
+    feature_dates = pd.to_datetime(features_df["trade_date"]).unique()
+    names = tuple((get_config() if cfg is None else cfg)["factor_names"])
+    state_dates = usable_market_state_dates(market_state_df, names)
     common = pd.DatetimeIndex(feature_dates).intersection(state_dates).sort_values()
     requested = common[(common >= pd.Timestamp(start)) & (common <= pd.Timestamp(end))]
     if len(requested) == 0:

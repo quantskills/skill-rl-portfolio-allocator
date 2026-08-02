@@ -270,7 +270,8 @@ def main() -> None:
     feats = pd.read_parquet(features_path)
     market_state = pd.read_parquet(market_state_path)
     start, end = effective_range(
-        feats, market_state, cfg["start_date"], cfg["end_date"] or "2099-12-31"
+        feats, market_state, cfg["start_date"], cfg["end_date"] or "2099-12-31",
+        cfg=cfg,
     )
     print(f"effective range: {start.date()} ~ {end.date()}")
     env = make_env(str(features_path), str(market_state_path), cfg, start, end)

@@ -5,7 +5,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import scripts.allocate as allocate
 from scripts.allocate import atomic_publish, load_research_approval
+from scripts.config import FACTOR_NAMES
+from scripts.state import STATE_SCHEMA_VERSION, state_fields
 from scripts.validate import validate_weights
 
 
@@ -100,3 +103,34 @@ def test_failed_publish_does_not_replace_existing_formal_files(tmp_path):
     with pytest.raises((RuntimeError, ValueError)):
         atomic_publish(candidate, production)
     assert sentinel.read_bytes() == b"sentinel"
+
+
+def test_atomic_publish_accepts_current_dynamic_state_schema(tmp_path, monkeypatch):
+    candidate = tmp_path / "candidate"
+    production = tmp_path / "production"
+    candidate.mkdir()
+    method = {"schema_version": STATE_SCHEMA_VERSION, "method": "ppo"}
+    _write_approval(candidate, method=method)
+    fields = list(state_fields(FACTOR_NAMES))
+    scaler = candidate / "scaler.json"
+    scaler.write_text(json.dumps({
+        "schema_version": STATE_SCHEMA_VERSION,
+        "fields": fields,
+        "mean": [0.0] * len(fields),
+        "scale": [1.0] * len(fields),
+    }), encoding="utf-8")
+    checkpoint = candidate / "checkpoint.zip"
+    checkpoint.write_bytes(b"checkpoint")
+    (candidate / "allocations.parquet").write_bytes(b"allocations")
+    approval = json.loads((candidate / "approval.json").read_text())
+    (candidate / "checkpoint_metadata.json").write_text(json.dumps({
+        "schema_version": STATE_SCHEMA_VERSION,
+        "method_id": approval["method_id"],
+        "checkpoint_id": allocate._file_id(checkpoint),
+        "scaler_id": allocate._file_id(scaler),
+    }), encoding="utf-8")
+    monkeypatch.setattr(allocate, "run_all", lambda *args, **kwargs: (True, []))
+
+    atomic_publish(candidate, production)
+
+    assert (production / "checkpoint.zip").read_bytes() == b"checkpoint"

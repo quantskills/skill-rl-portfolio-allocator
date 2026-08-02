@@ -14,6 +14,7 @@ from scripts.walk_forward import (
     select_candidate_on_validation,
 )
 from scripts.stress_test import apply_frozen_method, load_frozen_method
+from scripts.state import STATE_SCHEMA_VERSION
 
 
 def test_constants_are_closed_and_buffer_configs_are_exact():
@@ -150,6 +151,19 @@ def test_summary_contains_stress_readable_frozen_method(tmp_path):
     )
     assert set(full["method_by_fold"]) == {"1", "2", "3"}
     assert all(method["training_budget"] == 256 for method in full["method_by_fold"].values())
+
+
+def test_walk_forward_defaults_emitted_methods_to_current_state_schema(tmp_path):
+    def trainer(**kwargs):
+        return {"val_sharpe": 1.0, "checkpoint_path": "/tmp/fake.zip"}
+
+    smoke = run_walk_forward(
+        folds=default_folds(), output_root=tmp_path, smoke=True,
+        trainer=trainer, tester=lambda **kwargs: {"test_sharpe": 0.0},
+        coverage_checker=lambda: None,
+    )
+
+    assert smoke["frozen_method"]["schema_version"] == STATE_SCHEMA_VERSION
 
 
 def test_full_runs_use_unique_run_directories_and_write_frozen_test_records(tmp_path):

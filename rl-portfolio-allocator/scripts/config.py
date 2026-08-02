@@ -44,8 +44,8 @@ def get_config() -> dict:
     if reward_variant not in {"none", "low", "medium", "legacy_dsr"}:
         raise ValueError(f"unknown reward variant: {reward_variant}")
     return {
-        "factor_names": FACTOR_NAMES,
-        "k": K,
+        "factor_names": list(CONTROL_FACTOR_NAMES),
+        "k": len(CONTROL_FACTOR_NAMES),
         "top_n": TOP_N,
         "bottom_m": BOTTOM_M,
         "long_notional": LONG_NOTIONAL,

@@ -95,7 +95,7 @@ def atomic_publish(candidate_dir, production_dir) -> None:
     if not scaler.exists() or not checkpoint.exists() or not allocations.exists():
         raise FileNotFoundError("candidate allocations, scaler, or checkpoint missing")
     load_research_approval(approval)
-    if json.loads(scaler.read_text(encoding="utf-8")).get("schema_version") != "state-v1":
+    if json.loads(scaler.read_text(encoding="utf-8")).get("schema_version") != STATE_SCHEMA_VERSION:
         raise ValueError("candidate scaler schema mismatch")
     if checkpoint.stat().st_size == 0:
         raise ValueError("candidate checkpoint is empty")
@@ -187,7 +187,9 @@ def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
                         metadata_path: str | None = None,
                         method_id: str | None = None) -> str:
     dates = pd.to_datetime(features_df["trade_date"])
-    start, end = effective_range(features_df, market_state_df, dates.min(), dates.max())
+    start, end = effective_range(
+        features_df, market_state_df, dates.min(), dates.max(), cfg=cfg
+    )
     print(f"effective range: {start.date()} ~ {end.date()}")
     env = PortfolioEnv(features_df, market_state_df, cfg, start, end)
     scaler = fit_production_scaler(env, seed=seed)
@@ -219,7 +221,9 @@ def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str,
     dates = sorted(dates)
     ctx_start = dates[max(0, len(dates) - 60)]
     end = dates[-1]
-    ctx_start, end = effective_range(features_df, market_state_df, ctx_start, end)
+    ctx_start, end = effective_range(
+        features_df, market_state_df, ctx_start, end, cfg=cfg
+    )
     env = PortfolioEnv(
         features_df, market_state_df, cfg, ctx_start, end,
         observation_scaler=observation_scaler,

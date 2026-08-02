@@ -16,6 +16,7 @@ if __package__ in (None, ""):
 
 from scripts.check_data_coverage import Fold, check_folds, default_folds
 from scripts.research_gates import evaluate_research_gates
+from scripts.state import STATE_SCHEMA_VERSION
 
 
 def frozen_method_id(method: dict) -> str:
@@ -34,7 +35,8 @@ def write_approval(run_root: pathlib.Path, method: dict, gate_report: dict,
     method_path.write_text(json.dumps(_jsonable(method), indent=2, sort_keys=True), encoding="utf-8")
     gates_path.write_text(json.dumps(_jsonable(gate_report), indent=2, sort_keys=True), encoding="utf-8")
     approval = {
-        "research_ok": True, "schema_version": method.get("schema_version", "state-v1"),
+        "research_ok": True,
+        "schema_version": method.get("schema_version", STATE_SCHEMA_VERSION),
         "method_id": frozen_method_id(method), "method_path": "method.json",
         "gates_path": "gates.json", "run_id": run_id, "created_at": created_at,
         "run_mode": run_mode, "fold_count": fold_count, "seed_count": seed_count,
@@ -226,7 +228,7 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
     method_by_fold = {
         str(fold.fold): {
             "frozen_candidate": f"{selected_rewards[fold.fold]}__{selected_buffers[fold.fold]}",
-            "schema_version": (cfg or {}).get("schema_version", "state-v1"),
+            "schema_version": (cfg or {}).get("schema_version", STATE_SCHEMA_VERSION),
             "reward_variant": selected_rewards[fold.fold],
             "buffer_variant": selected_buffers[fold.fold],
             "buffer_config": BUFFER_CONFIGS[selected_buffers[fold.fold]],

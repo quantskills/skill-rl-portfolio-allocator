@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 
-STATE_SCHEMA_VERSION = "state-v1"
+STATE_SCHEMA_VERSION = "state-v2-dynamic-factors"
 BASE_MARKET_FIELDS = (
     "market_ret_20",
     "market_ret_60",
@@ -54,9 +54,7 @@ def state_fields(factor_names: list[str] | tuple[str, ...]) -> list[str]:
     return fields
 
 
-def state_dim(factor_names: int | list[str] | tuple[str, ...]) -> int:
-    if isinstance(factor_names, int):
-        factor_names = [f"factor_{i}" for i in range(factor_names)]
+def state_dim(factor_names: list[str] | tuple[str, ...]) -> int:
     return len(state_fields(factor_names))
 
 
@@ -96,14 +94,12 @@ class StateBuilder:
         self._field_index: dict[str, int] = {}
 
     def field_index(self, field_name: str, factor_names: list[str] | tuple[str, ...] | None = None) -> int:
+        if not self._field_index and factor_names is None:
+            raise TypeError("factor_names are required for state field construction")
         if not self._field_index or (factor_names is not None and field_name not in self._field_index):
-            names = list(factor_names or self._infer_factor_names())
+            names = list(factor_names)
             self._field_index = {name: i for i, name in enumerate(state_fields(names))}
         return self._field_index[field_name]
-
-    def _infer_factor_names(self) -> list[str]:
-        panel = next(iter(self.factor_panel_by_date.values()), None)
-        return list(panel.columns) if panel is not None else []
 
     def build(
         self,
