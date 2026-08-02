@@ -18,7 +18,7 @@ def artifact_paths(root, fold: int, seed: int, candidate: str,
         "model": root / f"{stem}_{candidate}.zip",
         "scaler": root / f"{stem}_scaler.json",
         "log": root / f"{stem}_{candidate}_training.jsonl",
-        "metadata": root / f"{stem}_{candidate}.json",
+        "metadata": root / f"{stem}_{candidate}_metadata.json",
     }
 
 
@@ -93,12 +93,13 @@ class TrainingMetricsCallback(BaseCallback):
 
 class ValidationSharpeCallback(BaseCallback):
     def __init__(self, eval_env, eval_freq=10000, patience=5,
-                 best_model_path=None, verbose=0):
+                 best_model_path=None, log_path=None, verbose=0):
         super().__init__(verbose)
         self.eval_env = eval_env
         self.eval_freq = int(eval_freq)
         self.patience = int(patience)
         self.best_model_path = pathlib.Path(best_model_path) if best_model_path else None
+        self.log_path = pathlib.Path(log_path) if log_path else None
         self.best_eval_metric = float("-inf")
         self.no_improvement_evals = 0
         self.deterministic = True
@@ -118,6 +119,15 @@ class ValidationSharpeCallback(BaseCallback):
             self.no_improvement_evals += 1
             if self.no_improvement_evals >= self.patience:
                 self.model.stop_training = True
+        if self.log_path is not None:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "timesteps": int(self.num_timesteps),
+                "validation_net_sharpe": metric,
+                "best_score": self.best_eval_metric,
+            }
+            with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
 
     def _on_step(self) -> bool:
         if self.num_timesteps and self.num_timesteps % self.eval_freq == 0:
@@ -198,11 +208,17 @@ def train_candidates(*, root, fold, seed, candidates, schema_version,
                       train_range=None, val_range=None, reward_variant=None,
                       buffer_variant=None):
     """Fit one scaler, then train each candidate against that frozen scaler."""
+    from scripts.config import FACTOR_NAMES
     from scripts.observation import collect_training_observations, ObservationScaler
+    from scripts.state import STATE_SCHEMA_VERSION, state_fields
 
+    if schema_version != STATE_SCHEMA_VERSION:
+        raise ValueError("schema_version must match the state schema")
     observations = collect_training_observations(raw_train_env, seed=seed)
-    fields = tuple(f"obs_{i}" for i in range(observations.shape[1]))
-    scaler = ObservationScaler.fit(observations, schema_version, fields)
+    fields = tuple(state_fields(FACTOR_NAMES))
+    if observations.shape[1] != len(fields):
+        raise ValueError("raw training observations do not match the state schema")
+    scaler = ObservationScaler.fit(observations, STATE_SCHEMA_VERSION, fields)
     results = {}
     for candidate in candidates:
         paths = artifact_paths(root, fold, seed, candidate, schema_version)
@@ -212,7 +228,7 @@ def train_candidates(*, root, fold, seed, candidates, schema_version,
         eval_env.observation_scaler = scaler
         validation = ValidationSharpeCallback(
             eval_env, eval_freq=10000, patience=5,
-            best_model_path=paths["model"])
+            best_model_path=paths["model"], log_path=paths["log"])
         train_ppo(raw_train_env, total_timesteps=total_timesteps, seed=seed,
                   device=device, save_path=str(paths["model"]), callback=validation,
                   training_log_path=paths["log"])
