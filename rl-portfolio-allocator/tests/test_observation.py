@@ -10,6 +10,19 @@ from scripts.observation import ObservationScaler, collect_training_observations
 from scripts.state import exogenous_fields, state_dim
 
 
+@pytest.fixture
+def factor_contract():
+    return {
+        "factor_catalog_version": "catalog-v1",
+        "factor_catalog_hash": "sha256:catalog",
+        "selected_factors": ["mom_20", "vol_20"],
+        "factor_directions": {"mom_20": 1, "vol_20": -1},
+        "selection_run_id": "selection-42",
+        "fold": 3,
+        "state_schema_version": "schema-test",
+    }
+
+
 def _env(observation_scaler=None):
     cfg = get_config()
     dates = pd.date_range("2020-01-01", periods=4, freq="D")
@@ -36,6 +49,35 @@ def _env(observation_scaler=None):
         dates.max(),
         observation_scaler=observation_scaler,
     )
+
+
+def test_scaler_fit_stores_ood_shift_threshold():
+    x = np.random.default_rng(0).normal(size=(500, 4)).astype(np.float32)
+    scaler = ObservationScaler.fit(x, "schema-test", ("a", "b", "c", "d"))
+    z = np.abs((x - x.mean(axis=0)) / np.where(x.std(axis=0) < 1e-8, 1.0, x.std(axis=0)))
+    expected = float(np.quantile(z.max(axis=1), 0.95))
+    assert scaler.ood_shift_threshold == pytest.approx(expected, rel=1e-5)
+
+
+def test_scaler_save_load_roundtrip_preserves_ood_threshold(tmp_path, factor_contract):
+    x = np.random.default_rng(1).normal(size=(200, 2)).astype(np.float32)
+    scaler = ObservationScaler.fit(x, "schema-test", ("a", "b"))
+    path = tmp_path / "scaler.json"
+    scaler.save(path, factor_contract)
+    loaded = ObservationScaler.load(path, "schema-test", factor_contract, fields=("a", "b"))
+    assert loaded.ood_shift_threshold == pytest.approx(scaler.ood_shift_threshold)
+
+
+def test_scaler_load_legacy_json_without_ood_key_returns_none(tmp_path, factor_contract):
+    x = np.random.default_rng(2).normal(size=(200, 2)).astype(np.float32)
+    scaler = ObservationScaler.fit(x, "schema-test", ("a", "b"))
+    path = tmp_path / "scaler.json"
+    scaler.save(path, factor_contract)
+    payload = json.loads(path.read_text())
+    del payload["ood_shift_threshold"]
+    path.write_text(json.dumps(payload))
+    loaded = ObservationScaler.load(path, "schema-test", factor_contract, fields=("a", "b"))
+    assert loaded.ood_shift_threshold is None
 
 
 def test_scaler_fit_transform_and_constant_columns():

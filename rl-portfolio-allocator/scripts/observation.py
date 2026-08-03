@@ -13,6 +13,7 @@ class ObservationScaler:
     fields: tuple[str, ...]
     mean: tuple[float, ...]
     scale: tuple[float, ...]
+    ood_shift_threshold: float | None = None
 
     @classmethod
     def fit(cls, x: np.ndarray, schema_version: str,
@@ -27,7 +28,10 @@ class ObservationScaler:
         mean = arr.mean(axis=0)
         std = arr.std(axis=0)
         scale = np.where(std < 1e-8, 1.0, std)
-        return cls(schema_version, tuple(fields), tuple(mean), tuple(scale))
+        z = np.abs((arr - mean) / scale)
+        ood_shift_threshold = float(np.quantile(z.max(axis=1), 0.95))
+        return cls(schema_version, tuple(fields), tuple(mean), tuple(scale),
+                   ood_shift_threshold=ood_shift_threshold)
 
     def transform(self, x: np.ndarray) -> np.ndarray:
         arr = np.asarray(x, dtype=float)
@@ -40,6 +44,7 @@ class ObservationScaler:
             "fields": list(self.fields),
             "mean": list(self.mean),
             "scale": list(self.scale),
+            "ood_shift_threshold": self.ood_shift_threshold,
         }
         from scripts.train import require_factor_contract
 
@@ -76,7 +81,8 @@ class ObservationScaler:
         )
         validate_factor_contract(actual_contract, expected_contract)
         return cls(data["schema_version"], tuple(data["fields"]),
-                   tuple(data["mean"]), tuple(data["scale"]))
+                   tuple(data["mean"]), tuple(data["scale"]),
+                   ood_shift_threshold=data.get("ood_shift_threshold"))
 
 
 def collect_training_observations(env, seed: int, max_steps: int = 4096) -> np.ndarray:

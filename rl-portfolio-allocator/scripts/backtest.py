@@ -20,6 +20,7 @@ from scripts.diagnostics import summarize_rollout, check_degeneracy
 
 
 def run_ppo_rollout(model, env) -> tuple[np.ndarray, list, list]:
+    env.ood_mix_enabled = True
     obs, _ = env.reset(seed=0)
     infos, rets, dates, done = [], [], [], False
     while not done:

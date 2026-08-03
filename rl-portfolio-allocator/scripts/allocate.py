@@ -501,6 +501,7 @@ def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str,
         metadata_path=metadata_path,
     )
 
+    env.ood_mix_enabled = True
     obs, _ = env.reset(seed=0)
     last_info = None
     last_target_w = None

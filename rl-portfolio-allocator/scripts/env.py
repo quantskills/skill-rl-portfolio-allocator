@@ -152,6 +152,7 @@ class PortfolioEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(state_dim(self.factor_names),), dtype=np.float32,
         )
+        self.ood_mix_enabled = False
         self._reset_internal()
 
     def _scale(self, obs: np.ndarray) -> np.ndarray:
@@ -194,6 +195,23 @@ class PortfolioEnv(gym.Env):
             np.asarray(action, dtype=float), self.prev_factor_w,
             self.cfg.get("max_delta", 0.2), self.cfg["ema_alpha"],
         )
+        factor_w_rl = factor_w
+        ood_shift, ood_alpha = 0.0, 0.0
+        scaler = self.observation_scaler
+        ood_threshold = getattr(scaler, "ood_shift_threshold", None) if scaler is not None else None
+        if self.ood_mix_enabled and ood_threshold:
+            prev_long = float(np.clip(self.prev_stock_w, 0, None).sum())
+            prev_short = float(np.clip(-self.prev_stock_w, 0, None).sum())
+            raw_obs = self.state_builder.build(
+                d, self.prev_stock_w, self.factor_names, self.prev_factor_w,
+                cash=max(0.0, 1.0 - prev_long - prev_short),
+            )
+            z = np.abs((raw_obs - scaler.mean) / scaler.scale)
+            ood_shift = float(z.max())
+            ood_alpha = float(np.clip((ood_shift - ood_threshold) / ood_threshold, 0.0, 1.0))
+            if ood_alpha > 0.0:
+                uniform = np.ones(self.k, dtype=float) / self.k
+                factor_w = (1.0 - ood_alpha) * factor_w + ood_alpha * uniform
         scores = composite_score(F, factor_w)
         long_idx, short_idx = buffered_long_short(
             scores, susp, self.prev_stock_w,
@@ -250,7 +268,7 @@ class PortfolioEnv(gym.Env):
         self.state_builder.portfolio_returns_history.append(net)
         self.state_builder.recent_turnover_history.append(turnover)
 
-        self.prev_factor_w = factor_w
+        self.prev_factor_w = factor_w_rl
         self.prev_stock_w = target_w
         self.t = next_t
 
@@ -269,6 +287,7 @@ class PortfolioEnv(gym.Env):
             "long_notional": long_notional, "short_notional": short_notional,
             "n_long": int(len(long_idx)), "n_short": int(len(short_idx)),
             "factor_w": factor_w.tolist(),
+            "ood_shift": ood_shift, "ood_alpha": ood_alpha,
             "hhi": hhi_v, "drawdown": drawdown,
             "diagnostics": {"dsr_metric": dsr_delta},
             "reward_parts": parts,

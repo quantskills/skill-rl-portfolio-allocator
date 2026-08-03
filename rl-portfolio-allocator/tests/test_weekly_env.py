@@ -4,7 +4,7 @@ import pytest
 
 from scripts.config import FACTOR_NAMES, K, get_config
 from scripts.env import PortfolioEnv, effective_range, extract_settle_holding_period
-from scripts.state import exogenous_fields
+from scripts.state import exogenous_fields, state_dim
 
 
 def _toy_data(periods=15):
@@ -19,6 +19,48 @@ def _toy_data(periods=15):
     features = pd.DataFrame(rows)
     state = pd.DataFrame(0.1, index=dates, columns=exogenous_fields(FACTOR_NAMES))
     return features, state
+
+
+class _StubScaler:
+    def __init__(self, dim, threshold):
+        self.mean = np.zeros(dim)
+        self.scale = np.ones(dim)
+        self.ood_shift_threshold = threshold
+
+    def transform(self, obs):
+        return np.asarray(obs, dtype=np.float32)
+
+
+def test_ood_mix_blends_factor_weights_toward_uniform():
+    features, state = _toy_data(periods=15)
+    cfg = get_config()
+    dim = state_dim(tuple(cfg["factor_names"]))
+    env = PortfolioEnv(features, state, cfg,
+                       features["trade_date"].min(), features["trade_date"].max(),
+                       observation_scaler=_StubScaler(dim, threshold=1e-9))
+    env.ood_mix_enabled = True
+    env.reset(seed=0)
+    k = len(cfg["factor_names"])
+    # 非对称动作,使未混合的 RL 权重与等权不同
+    action = np.linspace(1.0, -1.0, k, dtype=np.float32)
+    _, _, _, _, info = env.step(action)
+    assert info["ood_alpha"] == pytest.approx(1.0)
+    assert info["factor_w"] == pytest.approx([1.0 / k] * k)
+    # prev_factor_w 保存未混合的 RL 权重,不被兜底污染
+    assert not np.allclose(env.prev_factor_w, np.ones(k) / k)
+
+
+def test_ood_mix_disabled_by_default_leaves_weights_untouched():
+    features, state = _toy_data(periods=15)
+    cfg = get_config()
+    dim = state_dim(tuple(cfg["factor_names"]))
+    env = PortfolioEnv(features, state, cfg,
+                       features["trade_date"].min(), features["trade_date"].max(),
+                       observation_scaler=_StubScaler(dim, threshold=1e-9))
+    env.reset(seed=0)
+    k = len(cfg["factor_names"])
+    _, _, _, _, info = env.step(np.ones(k, dtype=np.float32))
+    assert info["ood_alpha"] == 0.0
 
 
 def test_env_rejects_data_without_a_settleable_period():
