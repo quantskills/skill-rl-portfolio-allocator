@@ -1,6 +1,6 @@
 ---
 name: rl-portfolio-allocator
-description: Use when training or backtesting a PPO factor-weight allocator on CSI300 with embedded costs and DSR reward.
+description: Use when training or backtesting a PPO factor-weight allocator on CSI300 with embedded costs and risk-penalized reward.
 license: GPL-3.0-only
 tags: [quant, rl, portfolio, ppo, ashare]
 ---
@@ -14,7 +14,7 @@ tags: [quant, rl, portfolio, ppo, ashare]
 - 详见 `references/factor-selection.md`(缓存布局、选择阈值、目录地图、gates、发布要求)。
 - 动作变换:`tanh` → L1 归一化(`Σ|wᵢ|=1`,可正可负)→ EMA 平滑(`α=0.5`)。
 - 综合得分 `s = F_t · w̃_t` → Top-N 做多(N=30) + Bottom-M 做空(M=15,名义上限 30%)。
-- Reward = 差分 Sharpe DSR(扣全成本净收益)− `λ_dd·max(0,drawdown)` − `λ_to·turnover` − `λ_conc·HHI`。
+- Reward(默认 variant=low)= 100·净收益 − 0.5·max(0, Δ回撤) − 0.05·max(0, turnover−0.2) − 0.5·max(0, HHI−0.03),clip ±5;variant=constrained 时回撤系数为对偶变量 λ_t(随 episode MDD 相对 TARGET_MDD=0.10 自适应),另加恢复信用 0.1·max(0, −Δ回撤) 与下行半方差项 0.2·min(0, 净收益)²;legacy_dsr 变体保留旧 DSR 公式。
 - 成本:佣金 3bps + 印花税 10bps(卖出侧) + 冲击 5bps × turnover + 融券年化 8%(按日折算)。
 
 ## 三类训练用途(不可混用)

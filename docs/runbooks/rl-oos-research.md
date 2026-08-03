@@ -38,6 +38,13 @@ python -m scripts.validate
 - turnover/cost 诊断查看每个 fold/seed 的 `annualized_turnover`、`cost_1x`、`cost_2x` 和 baseline 对照；seed 诊断查看 `metrics.jsonl` 与 summary 的聚合结果。
 - 只要 gate 失败，就保留研究产物用于诊断，不修改阈值、不凑 fold、不发布。
 
+## constrained reward 与 OOD 混合诊断（state-v3 起）
+
+- 对偶变量:训练 JSONL 每 rollout 记录 `dual_lambda_last` / `dual_lambda_max`;单步值在 env info 的 `reward_parts.dual_lambda`。λ 长期贴 0 说明回撤远低于 TARGET_MDD(reward 不压多头);λ 持续放大说明 episode MDD 超过目标。
+- OOD 混合:rollout info 记录 `ood_shift`(当前观测相对训练分布的 max|z|)与 `ood_alpha`(向 SFE 等权的混合比例);阈值在 scaler artifact 的 `ood_shift_threshold`(训练分布 95 分位),旧 scaler 无此键时混合自动禁用。
+- 新 gate:`candidate_stress_calmar_excess ≥ 0`(逐段 RL Calmar − SFE Calmar 的最差值)与 `candidate_stress_long_exposure_util ≥ 0.5`(逐段多头敞口利用率最差值);两者均为 fail-closed,证据缺失即失败。
+- Episode 随机化:训练 env 在各 fold train window 内随机采 52–156 周子窗口,危机段起点 3× 超采样(RLPA_EPISODE_MIN_WEEKS / RLPA_EPISODE_MAX_WEEKS / RLPA_CRISIS_OVERSAMPLE_WEIGHT 可调);val/test/stress 仍用全窗口确定性 rollout。
+
 ## 恢复上一个生产版本
 
 发布前保留当前 production 目录及其 approval、checkpoint、scaler 和 allocations 的完整副本。新 approval 未通过或 `validate` 失败时，不替换当前版本；恢复时将最后一个已验证版本的完整目录原子替换回 production 目录，然后重新运行：
