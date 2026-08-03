@@ -597,6 +597,8 @@ def aggregate_candidate_comparison(candidate_rows, control_rows, *, fold_count: 
         "candidate_annualized_turnover": median_field(candidate_rows, "annualized_turnover"),
         "candidate_stress_mdd": median_field(candidate_rows, "stress_mdd"),
         "control_stress_mdd": median_field(control_rows, "stress_mdd"),
+        "candidate_stress_calmar_excess": median_field(candidate_rows, "stress_calmar_excess"),
+        "candidate_stress_long_exposure_util": median_field(candidate_rows, "stress_long_exposure_util"),
         "paired_evidence": {
             "candidate_20f": {"rows": candidate_rows},
             "control_6f": {"rows": control_rows},
@@ -630,21 +632,46 @@ def _default_stress_tester(**kwargs) -> list:
     )
 
 
-def _stress_mdd_evidence(results: list) -> tuple[float | None, list[dict]]:
-    """Return the worst actual RL stress MDD, never an OOS substitute."""
-    mdds = []
+def _stress_evidence(results: list) -> tuple[float | None, float | None, float | None, list[dict]]:
+    """Return the worst actual RL stress evidence, never an OOS substitute.
+
+    Worst = min across non-skipped segments. stress_calmar_excess is the RL
+    calmar minus the static_factor_equal baseline calmar within the same
+    segment; long_exposure_util comes from the rollout diagnostics.
+    """
+    mdds, calmar_excesses, utils = [], [], []
     evidence = []
     for result in results:
         record = {"name": result.get("name"), "skipped": bool(result.get("skipped"))}
         if result.get("skipped"):
             record["reason"] = result.get("reason")
         else:
-            mdd = result.get("metrics", {}).get("rl", {}).get("mdd")
+            metrics = result.get("metrics", {})
+            mdd = metrics.get("rl", {}).get("mdd")
             record["stress_mdd"] = mdd
             if mdd is not None:
                 mdds.append(float(mdd))
+            rl_calmar = metrics.get("rl", {}).get("calmar")
+            sfe_calmar = metrics.get("static_factor_equal", {}).get("calmar")
+            calmar_excess = (
+                float(rl_calmar) - float(sfe_calmar)
+                if rl_calmar is not None and sfe_calmar is not None
+                else None
+            )
+            record["stress_calmar_excess"] = calmar_excess
+            if calmar_excess is not None:
+                calmar_excesses.append(calmar_excess)
+            util = result.get("diagnostics", {}).get("long_exposure_util")
+            record["long_exposure_util"] = util
+            if util is not None:
+                utils.append(float(util))
         evidence.append(record)
-    return (min(mdds) if mdds else None), evidence
+    return (
+        min(mdds) if mdds else None,
+        min(calmar_excesses) if calmar_excesses else None,
+        min(utils) if utils else None,
+        evidence,
+    )
 
 
 def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, tester=None,
@@ -950,14 +977,19 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
                         features_df=stress_features, market_state_df=stress_state,
                         cfg=dict(branch_cfg), timesteps=training_budget, method=method,
                     )
-                    stress_mdd, stress_evidence = _stress_mdd_evidence(stress_results)
+                    stress_mdd, stress_calmar_excess, stress_util, stress_evidence = _stress_evidence(stress_results)
                     stress_path = branch_root / "stress" / f"fold{fold.fold}" / f"seed{row['seed']}.json"
                     _write(stress_path, {
                         "branch": branch, "fold": fold.fold, "seed": row["seed"],
                         "checkpoint_path": row.get("checkpoint_path"),
-                        "stress_mdd": stress_mdd, "segments": stress_evidence,
+                        "stress_mdd": stress_mdd,
+                        "stress_calmar_excess": stress_calmar_excess,
+                        "stress_long_exposure_util": stress_util,
+                        "segments": stress_evidence,
                     })
                     row["stress_mdd"] = stress_mdd
+                    row["stress_calmar_excess"] = stress_calmar_excess
+                    row["stress_long_exposure_util"] = stress_util
                     row["stress_artifact_path"] = str(stress_path.relative_to(run_root))
                     row["stress_artifact_sha256"] = artifact_id(stress_path)
                     if branch == "candidate_20f":

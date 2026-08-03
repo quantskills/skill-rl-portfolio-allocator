@@ -60,6 +60,7 @@ def complete_paired_rows():
                 "branch": "candidate_20f", "fold": fold, "seed": seed,
                 "oos_sharpe": 0.60, "cost_2x_oos_sharpe": 0.12,
                 "annualized_turnover": 8.0, "stress_mdd": -0.25,
+                "stress_calmar_excess": 0.02, "stress_long_exposure_util": 0.8,
                 "stress_artifact_path": f"candidate_20f/stress/fold{fold}/seed{seed}.json",
                 "stress_artifact_sha256": "sha256:" + "0" * 64,
             })
@@ -67,6 +68,7 @@ def complete_paired_rows():
                 "branch": "control_6f", "fold": fold, "seed": seed,
                 "oos_sharpe": 0.40, "cost_2x_oos_sharpe": 0.08,
                 "annualized_turnover": 7.0, "stress_mdd": -0.24,
+                "stress_calmar_excess": 0.01, "stress_long_exposure_util": 0.75,
                 "stress_artifact_path": f"control_6f/stress/fold{fold}/seed{seed}.json",
                 "stress_artifact_sha256": "sha256:" + "1" * 64,
             })
@@ -154,3 +156,49 @@ def test_candidate_gates_reject_rows_without_distinct_persisted_stress_evidence(
 
     assert result["research_ok"] is False
     assert any("stress artifact" in reason for reason in result["failure_reasons"])
+
+
+def _paired_summary(candidate_overrides=None, control_overrides=None):
+    candidate_rows, control_rows = complete_paired_rows()
+    for row in candidate_rows:
+        row.update(candidate_overrides or {})
+    for row in control_rows:
+        row.update(control_overrides or {})
+    return aggregate_candidate_comparison(candidate_rows, control_rows, fold_count=3, seed_count=5)
+
+
+def _gate_by_name(result, name):
+    return next(gate for gate in result["gates"] if gate["name"] == name)
+
+
+def test_stress_calmar_excess_gate_fails_when_rl_loses_to_sfe():
+    summary = _paired_summary(candidate_overrides={"stress_calmar_excess": -0.05})
+    result = evaluate_candidate_gates(summary)
+    gate = _gate_by_name(result, "candidate_stress_calmar_excess")
+    assert gate["passed"] is False
+    assert gate["actual"] == pytest.approx(-0.05)
+    assert result["research_ok"] is False
+
+
+def test_stress_long_exposure_util_gate_fails_on_degenerate_solution():
+    summary = _paired_summary(candidate_overrides={"stress_long_exposure_util": 0.3})
+    result = evaluate_candidate_gates(summary)
+    gate = _gate_by_name(result, "candidate_stress_long_exposure_util")
+    assert gate["passed"] is False
+    assert result["research_ok"] is False
+
+
+def test_new_stress_metrics_are_required_evidence():
+    candidate_rows, control_rows = complete_paired_rows()
+    for row in candidate_rows:
+        del row["stress_calmar_excess"]
+    summary = aggregate_candidate_comparison(candidate_rows, control_rows, fold_count=3, seed_count=5)
+    result = evaluate_candidate_gates(summary)
+    assert result["research_ok"] is False
+    assert any("stress_calmar_excess" in reason for reason in result["failure_reasons"])
+
+
+def test_passing_paired_evidence_passes_all_eight_gates():
+    result = evaluate_candidate_gates(_paired_summary())
+    assert result["research_ok"] is True
+    assert len(result["gates"]) == 8

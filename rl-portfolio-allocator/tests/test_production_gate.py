@@ -70,6 +70,8 @@ def _write_approval(root, *, research_ok=True, method=None, gates_ok=True, evide
                         "branch": branch, "fold": fold, "seed": seed,
                         "oos_sharpe": sharpe, "cost_2x_oos_sharpe": 0.12,
                         "annualized_turnover": 8.0, "stress_mdd": mdd,
+                        "stress_calmar_excess": 0.02 if branch == "candidate_20f" else 0.01,
+                        "stress_long_exposure_util": 0.8 if branch == "candidate_20f" else 0.75,
                         "stress_artifact_path": relative,
                         "stress_artifact_sha256": stress_artifact_sha256,
                     })
@@ -81,6 +83,8 @@ def _write_approval(root, *, research_ok=True, method=None, gates_ok=True, evide
             "candidate_annualized_turnover": 8.0,
             "candidate_stress_mdd": -0.25,
             "control_stress_mdd": -0.24,
+            "candidate_stress_calmar_excess": 0.02,
+            "candidate_stress_long_exposure_util": 0.8,
             "paired_evidence": {
                 "candidate_20f": {"rows": candidate_rows},
                 "control_6f": {"rows": control_rows},

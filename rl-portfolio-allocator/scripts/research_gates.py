@@ -106,6 +106,8 @@ def evaluate_candidate_gates(summary: dict) -> dict:
                 ("candidate_cost_2x_oos_sharpe", 0),
                 ("candidate_annualized_turnover", 12),
                 ("candidate_stress_mdd_excess", 0.05),
+                ("candidate_stress_calmar_excess", 0),
+                ("candidate_stress_long_exposure_util", 0.5),
             )
         ]
         return {"research_ok": False, "gates": gates, "failure_reasons": evidence_failures}
@@ -133,6 +135,8 @@ def evaluate_candidate_gates(summary: dict) -> dict:
         _gate("candidate_cost_2x_oos_sharpe", get("candidate_cost_2x_oos_sharpe"), 0, lambda actual, threshold: actual > threshold),
         _gate("candidate_annualized_turnover", get("candidate_annualized_turnover"), 12, lambda actual, threshold: actual <= threshold),
         _gate("candidate_stress_mdd_excess", stress_mdd_excess, 0.05, lambda actual, threshold: actual <= threshold),
+        _gate("candidate_stress_calmar_excess", get("candidate_stress_calmar_excess"), 0, lambda actual, threshold: actual >= threshold),
+        _gate("candidate_stress_long_exposure_util", get("candidate_stress_long_exposure_util"), 0.5, lambda actual, threshold: actual >= threshold),
         _gate("complete_paired_evidence", True, True, lambda actual, threshold: actual is True),
     ]
     return {"research_ok": all(gate["passed"] for gate in gates), "gates": gates, "failure_reasons": []}
@@ -148,6 +152,8 @@ def _paired_evidence_failures(evidence: Any) -> list[str]:
         "cost_2x_oos_sharpe",
         "annualized_turnover",
         "stress_mdd",
+        "stress_calmar_excess",
+        "stress_long_exposure_util",
     )
     expected_branches = ("candidate_20f", "control_6f")
     branch_keys = {}

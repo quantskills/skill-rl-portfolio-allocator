@@ -604,7 +604,14 @@ def test_full_run_accepts_explicit_run_id_and_writes_full_approval(tmp_path, mon
 
     monkeypatch.setattr(
         stress_test, "run_all_stress",
-        lambda *args, **kwargs: [{"skipped": False, "metrics": {"rl": {"mdd": -0.10}}}],
+        lambda *args, **kwargs: [{
+            "skipped": False,
+            "metrics": {
+                "rl": {"mdd": -0.10, "calmar": 0.9},
+                "static_factor_equal": {"mdd": -0.11, "calmar": 0.8},
+            },
+            "diagnostics": {"long_exposure_util": 0.9},
+        }],
     )
     result = run_walk_forward(
         folds=default_folds(), output_root=tmp_path, smoke=False,
@@ -1128,3 +1135,31 @@ def test_smoke_never_writes_factor_approval(tmp_path):
     )
 
     assert not (tmp_path / "smoke" / "approval.json").exists()
+
+
+def test_stress_evidence_extracts_worst_segment_metrics():
+    from scripts.walk_forward import _stress_evidence
+    results = [
+        {"name": "2008_gfc", "skipped": True, "reason": "insufficient history"},
+        {"name": "2015_ashare_crash", "skipped": False,
+         "metrics": {"rl": {"mdd": -0.15, "calmar": 0.8},
+                     "static_factor_equal": {"mdd": -0.16, "calmar": 0.7}},
+         "diagnostics": {"long_exposure_util": 0.9}},
+        {"name": "2020_covid", "skipped": False,
+         "metrics": {"rl": {"mdd": -0.10, "calmar": 0.5},
+                     "static_factor_equal": {"mdd": -0.08, "calmar": 0.6}},
+         "diagnostics": {"long_exposure_util": 0.4}},
+    ]
+    mdd, calmar_excess, util, evidence = _stress_evidence(results)
+    assert mdd == pytest.approx(-0.15)
+    assert calmar_excess == pytest.approx(-0.1)   # 2020 段 0.5 − 0.6 最差
+    assert util == pytest.approx(0.4)
+    assert evidence[0] == {"name": "2008_gfc", "skipped": True, "reason": "insufficient history"}
+    assert evidence[2]["stress_calmar_excess"] == pytest.approx(-0.1)
+    assert evidence[2]["long_exposure_util"] == pytest.approx(0.4)
+
+
+def test_stress_evidence_all_skipped_returns_none():
+    from scripts.walk_forward import _stress_evidence
+    results = [{"name": "2008_gfc", "skipped": True, "reason": "x"}]
+    assert _stress_evidence(results)[:3] == (None, None, None)
