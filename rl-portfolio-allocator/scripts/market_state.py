@@ -10,7 +10,7 @@ import pandas as pd
 from scripts import costs
 from scripts.config import get_config
 
-MARKET_STATE_SCHEMA_VERSION = "market-state-v1"
+MARKET_STATE_SCHEMA_VERSION = "market-state-v2"
 
 
 def distribution_shift_report(
@@ -118,6 +118,16 @@ def _rolling_drawdown(returns: pd.Series, window: int = 60) -> pd.Series:
     return wealth / peak - 1.0
 
 
+def _expanding_percentile(window: np.ndarray) -> float:
+    """当前值在历史(不含当前)中的分位,因果、跨 regime 可比。"""
+    current = window[-1]
+    history = window[:-1]
+    history = history[np.isfinite(history)]
+    if not np.isfinite(current) or history.size == 0:
+        return np.nan
+    return float((history <= current).mean())
+
+
 def rolling_mean_factor_corr(
     factor_returns: pd.DataFrame, window: int, factor_names
 ) -> pd.Series:
@@ -161,6 +171,11 @@ def _market_features(index_returns: pd.DataFrame) -> pd.DataFrame:
     out["market_drawdown_60"] = _rolling_drawdown(ret, 60)
     expanding_vol = ret.expanding(min_periods=2).std()
     out["market_vol_regime"] = out["market_vol_20"] / expanding_vol.replace(0.0, np.nan)
+    out["market_vol_percentile_20"] = out["market_vol_20"].expanding(min_periods=60).apply(
+        _expanding_percentile, raw=True,
+    )
+    nav = (1.0 + ret.fillna(0.0)).cumprod()
+    out["market_drawdown_ath"] = nav / nav.cummax() - 1.0
     return out.reset_index()
 
 

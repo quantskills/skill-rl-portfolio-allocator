@@ -92,6 +92,6 @@ def test_get_config_returns_independent_factor_name_list():
 
 
 def test_state_schema_and_dimension_require_explicit_factor_names():
-    assert STATE_SCHEMA_VERSION == "state-v2-dynamic-factors"
+    assert STATE_SCHEMA_VERSION == "state-v3-constrained"
     with pytest.raises(TypeError):
         state_dim(3)

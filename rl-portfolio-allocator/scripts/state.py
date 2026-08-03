@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 
-STATE_SCHEMA_VERSION = "state-v2-dynamic-factors"
+STATE_SCHEMA_VERSION = "state-v3-constrained"
 BASE_MARKET_FIELDS = (
     "market_ret_20",
     "market_ret_60",
@@ -15,6 +15,8 @@ BASE_MARKET_FIELDS = (
     "market_vol_60",
     "market_drawdown_60",
     "market_vol_regime",
+    "market_vol_percentile_20",
+    "market_drawdown_ath",
 )
 
 
