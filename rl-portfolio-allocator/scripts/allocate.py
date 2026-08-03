@@ -95,6 +95,7 @@ def load_research_approval(path) -> dict:
     required = {
         "schema_version", "method_id", "method_path", "gates_path",
         "comparison_path", "comparison_id", "run_mode", "fold_count", "seed_count",
+        "factor_selection_path", "factor_selection_id",
     }
     missing = required - set(data)
     if missing:
@@ -116,6 +117,14 @@ def load_research_approval(path) -> dict:
         raise RuntimeError("approval and method schema mismatch")
     if frozen_method_id(method) != data["method_id"]:
         raise RuntimeError("approved method hash mismatch")
+    selection_path = _approval_reference(
+        approval_path, data["factor_selection_path"], "factor_selection_path"
+    )
+    if not selection_path.exists():
+        raise FileNotFoundError("approval references missing selected-factor bundle")
+    if _file_id(selection_path) != data["factor_selection_id"]:
+        raise RuntimeError("approval selected-factor hash mismatch")
+    _validate_selected_factor_bundle(selection_path, method_contract)
     gates = json.loads(gates_path.read_text(encoding="utf-8"))
     if gates.get("research_ok") is not True:
         raise RuntimeError("approved gates did not pass")
@@ -132,6 +141,28 @@ def load_research_approval(path) -> dict:
         raise RuntimeError("comparison evidence did not pass research gates")
     _validate_persisted_paired_evidence(approval_path.parent, comparison)
     return data
+
+
+def _validate_selected_factor_bundle(path: pathlib.Path, method_contract: dict) -> None:
+    """Bind the persisted selection artifact to the approved method contract."""
+    payload = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    records = payload.get("selected_factors") if isinstance(payload, dict) else None
+    if not isinstance(records, list) or not records:
+        raise ValueError("selected-factor bundle must contain ordered selected_factors")
+    names = []
+    directions = []
+    for record in records:
+        if not isinstance(record, dict) or "name" not in record or "direction" not in record:
+            raise ValueError("selected-factor bundle records must contain name and direction")
+        names.append(record["name"])
+        directions.append(int(record["direction"]))
+    if names != list(method_contract["selected_factors"]):
+        raise RuntimeError("selected-factor bundle disagrees with approved method")
+    if directions != [int(direction) for direction in method_contract["factor_directions"]]:
+        raise RuntimeError("selected-factor bundle directions disagree with approved method")
+    fold = payload.get("fold")
+    if fold is not None and int(fold) != int(method_contract["fold"]):
+        raise RuntimeError("selected-factor bundle fold disagrees with approved method")
 
 
 def _approval_reference(approval_path: pathlib.Path, value, field: str) -> pathlib.Path:
@@ -221,7 +252,7 @@ def copy_approval_bundle(approval_path, candidate_dir) -> None:
     load_research_approval(source_approval)
     candidate.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_approval, candidate / "approval.json")
-    for field in ("method_path", "gates_path", "comparison_path"):
+    for field in ("method_path", "gates_path", "comparison_path", "factor_selection_path"):
         reference = pathlib.Path(data[field])
         source = _approval_reference(source_approval, data[field], field)
         if not source.exists():
@@ -317,6 +348,37 @@ def atomic_publish(candidate_dir, production_dir) -> None:
         raise
     if backup.exists():
         shutil.rmtree(backup)
+
+
+def _load_production_panels(root, factor_contract: dict, cfg: dict):
+    """Materialize exactly the approved ordered factors for production runs.
+
+    The legacy six control factors keep reading the maintained features and
+    market_state files; any other approved selection is materialized from the
+    family-partitioned factor cache so only those columns are loaded, and the
+    market state is rebuilt for the same ordered names.
+    """
+    contract = require_factor_contract(
+        factor_contract, context="production panel factor contract"
+    )
+    names = list(contract["selected_factors"])
+    root = pathlib.Path(root)
+    if tuple(names) == tuple(FACTOR_NAMES):
+        return (
+            pd.read_parquet(root / "data" / "features.parquet"),
+            pd.read_parquet(root / "data" / "market_state.parquet"),
+        )
+    from scripts.factor_cache import materialize_selected_panel
+    from scripts.market_state import build_market_state
+
+    records = [
+        {"name": name, "direction": int(direction)}
+        for name, direction in zip(names, contract["factor_directions"])
+    ]
+    features = materialize_selected_panel(root / "data" / "factors", records)
+    index_returns = pd.read_parquet(root / "data" / "index_returns.parquet")
+    market_state = build_market_state(features, index_returns, cfg, factor_names=names)
+    return features, market_state
 
 
 def fit_production_scaler(env, seed: int, factor_names=None) -> ObservationScaler:
@@ -523,8 +585,6 @@ def save_allocations(df: pd.DataFrame, path: str) -> None:
 def main() -> None:
     cfg = get_config()
     root = pathlib.Path(__file__).resolve().parent.parent
-    feats_path = root / "data" / "features.parquet"
-    market_state_path = root / "data" / "market_state.parquet"
     formal_ckpt = root / "checkpoints" / "production.zip"
     formal_out = root.parent / "rl-portfolio-allocator-production" / "data" / "allocations.parquet"
 
@@ -563,8 +623,6 @@ def main() -> None:
         metadata_path = None
         out_path = formal_out
 
-    feats = pd.read_parquet(feats_path)
-    market_state = pd.read_parquet(market_state_path)
     cfg.update({
         key: approved_method[key]
         for key in ("reward_variant", "buffer_variant")
@@ -575,6 +633,7 @@ def main() -> None:
         cfg["k"] = len(approved_factor_names)
     if approved_method.get("buffer_config"):
         cfg.update(approved_method["buffer_config"])
+    feats, market_state = _load_production_panels(root, factor_contract, cfg)
     if args.retrain:
         retrain_production(
             feats, cfg, args.timesteps, seed=0,

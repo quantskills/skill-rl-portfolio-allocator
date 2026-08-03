@@ -61,6 +61,16 @@ def _write_passing_approval(root, method):
     comparison_path.write_text(json.dumps(comparison), encoding="utf-8")
     comparison_id = allocate._file_id(comparison_path)
     (root / "method.json").write_text(json.dumps(method), encoding="utf-8")
+    selection_relative = "candidate_20f/selection/fold3/selected_factors.json"
+    selection_path = root / selection_relative
+    selection_path.parent.mkdir(parents=True, exist_ok=True)
+    selection_path.write_text(json.dumps({
+        "fold": 3,
+        "selected_factors": [
+            {"name": name, "direction": direction}
+            for name, direction in zip(method["selected_factors"], method["factor_directions"])
+        ],
+    }), encoding="utf-8")
     (root / "gates.json").write_text(json.dumps({
         "research_ok": True, "comparison_path": "comparison.json",
         "comparison_id": comparison_id,
@@ -71,6 +81,8 @@ def _write_passing_approval(root, method):
         "method_id": allocate.frozen_method_id(method), "method_path": "method.json",
         "gates_path": "gates.json", "comparison_path": "comparison.json",
         "comparison_id": comparison_id,
+        "factor_selection_path": selection_relative,
+        "factor_selection_id": allocate._file_id(selection_path),
     }
     approval_path = root / "approval.json"
     approval_path.write_text(json.dumps(approval), encoding="utf-8")
@@ -99,6 +111,7 @@ def test_candidate_approval_bundle_preserves_referenced_paths(tmp_path):
     assert (candidate / "comparison.json").exists()
     assert (candidate / "candidate_20f" / "stress" / "fold1" / "seed0.json").exists()
     assert (candidate / "control_6f" / "stress" / "fold3" / "seed4.json").exists()
+    assert (candidate / "candidate_20f" / "selection" / "fold3" / "selected_factors.json").exists()
 
 
 def test_retrain_candidate_routes_all_artifacts_away_from_production(
@@ -120,13 +133,16 @@ def test_retrain_candidate_routes_all_artifacts_away_from_production(
         allocate, "load_approved_method",
         lambda path: (json.loads(approval.read_text()), method),
     )
-    monkeypatch.setattr(
-        allocate.pd,
-        "read_parquet",
-        lambda path: pd.DataFrame({"trade_date": [pd.Timestamp("2024-01-02")]})
-        if "features" in str(path)
-        else pd.DataFrame(),
-    )
+    panels = {}
+
+    def fake_panels(root, factor_contract, cfg):
+        panels["factor_contract"] = factor_contract
+        return (
+            pd.DataFrame({"trade_date": [pd.Timestamp("2024-01-02")]}),
+            pd.DataFrame(),
+        )
+
+    monkeypatch.setattr(allocate, "_load_production_panels", fake_panels)
 
     captured = {}
 
@@ -188,6 +204,7 @@ def test_retrain_candidate_routes_all_artifacts_away_from_production(
     assert captured["retrain_cfg"]["k"] == len(selected_factors)
     assert captured["infer_cfg"]["factor_names"] == selected_factors
     assert captured["infer_cfg"]["k"] == len(selected_factors)
+    assert panels["factor_contract"]["selected_factors"] == selected_factors
     assert not formal_checkpoint.exists()
     assert not formal_allocations.exists()
 
@@ -416,3 +433,60 @@ def test_infer_latest_rejects_missing_observation_scaler():
             pd.DataFrame(), factor_contract=_factor_contract(FACTOR_NAMES[:2]),
             metadata_path="metadata.json",
         )
+
+
+def test_load_production_panels_materializes_only_approved_factors(tmp_path, monkeypatch):
+    import scripts.factor_cache as factor_cache
+    import scripts.market_state as market_state_module
+
+    selected = [FACTOR_NAMES[4], FACTOR_NAMES[0]]
+    contract = _factor_contract(selected)
+    contract["factor_directions"] = [1, -1]
+    captured = {}
+    features = pd.DataFrame({"trade_date": [pd.Timestamp("2024-01-02")]})
+    state = pd.DataFrame({"trade_date": [pd.Timestamp("2024-01-02")]})
+
+    monkeypatch.setattr(
+        factor_cache,
+        "materialize_selected_panel",
+        lambda root, records: captured.update({"root": root, "records": records}) or features,
+    )
+    monkeypatch.setattr(
+        market_state_module,
+        "build_market_state",
+        lambda feats, index_returns, cfg, factor_names: (
+            captured.update({"factor_names": factor_names}) or state
+        ),
+    )
+    monkeypatch.setattr(
+        allocate.pd,
+        "read_parquet",
+        lambda path: pd.DataFrame({"trade_date": [pd.Timestamp("2024-01-02")], "ret": [0.0]}),
+    )
+
+    out_features, out_state = allocate._load_production_panels(tmp_path, contract, {})
+
+    assert out_features is features
+    assert out_state is state
+    assert captured["root"] == tmp_path / "data" / "factors"
+    assert captured["records"] == [
+        {"name": FACTOR_NAMES[4], "direction": 1},
+        {"name": FACTOR_NAMES[0], "direction": -1},
+    ]
+    assert captured["factor_names"] == selected
+
+
+def test_load_production_panels_uses_legacy_files_for_control_factors(tmp_path):
+    contract = _factor_contract()
+    (tmp_path / "data").mkdir()
+    pd.DataFrame({"trade_date": [pd.Timestamp("2024-01-02")], "x": [1]}).to_parquet(
+        tmp_path / "data" / "features.parquet", index=False
+    )
+    pd.DataFrame({"trade_date": [pd.Timestamp("2024-01-02")], "y": [2]}).to_parquet(
+        tmp_path / "data" / "market_state.parquet", index=False
+    )
+
+    feats, market_state = allocate._load_production_panels(tmp_path, contract, {})
+
+    assert list(feats.columns) == ["trade_date", "x"]
+    assert list(market_state.columns) == ["trade_date", "y"]

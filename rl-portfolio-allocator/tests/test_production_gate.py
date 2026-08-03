@@ -32,6 +32,24 @@ def _write_approval(root, *, research_ok=True, method=None, gates_ok=True, evide
         **_factor_contract(),
     }
     (root / "method.json").write_text(json.dumps(method), encoding="utf-8")
+    selection_names = list(
+        method.get("selected_factors") or method.get("factor_names") or FACTOR_NAMES
+    )
+    selection_directions = list(
+        method.get("factor_directions")
+        or [(-1 if index % 2 else 1) for index, _ in enumerate(selection_names)]
+    )
+    selection_relative = "candidate_20f/selection/fold3/selected_factors.json"
+    selection_path = root / selection_relative
+    selection_path.parent.mkdir(parents=True, exist_ok=True)
+    selection_path.write_text(json.dumps({
+        "fold": 3,
+        "selected_factors": [
+            {"name": name, "direction": direction}
+            for name, direction in zip(selection_names, selection_directions)
+        ],
+    }), encoding="utf-8")
+    selection_id = allocate._file_id(selection_path)
     if evidence:
         candidate_rows = []
         control_rows = []
@@ -87,6 +105,8 @@ def _write_approval(root, *, research_ok=True, method=None, gates_ok=True, evide
         .frozen_method_id(method),
         "method_path": "method.json",
         "gates_path": "gates.json",
+        "factor_selection_path": selection_relative,
+        "factor_selection_id": selection_id,
         **({"comparison_path": "comparison.json", "comparison_id": comparison_id} if evidence else {}),
     }
     path = root / "approval.json"
@@ -199,6 +219,41 @@ def test_load_research_approval_rejects_conflicting_factor_name_alias(tmp_path):
     path = _write_approval(tmp_path, method=method)
 
     with pytest.raises(ValueError, match="selected_factors and factor_names"):
+        load_research_approval(path)
+
+
+def test_publish_requires_selected_factor_bundle(tmp_path):
+    path = _write_approval(tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["factor_selection_path"] = "missing.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises((FileNotFoundError, ValueError)):
+        load_research_approval(path)
+
+
+def test_load_research_approval_rejects_selected_factor_hash_mismatch(tmp_path):
+    path = _write_approval(tmp_path)
+    selection = tmp_path / "candidate_20f" / "selection" / "fold3" / "selected_factors.json"
+    payload = json.loads(selection.read_text(encoding="utf-8"))
+    payload["notes"] = "tampered"
+    selection.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="selected-factor"):
+        load_research_approval(path)
+
+
+def test_load_research_approval_rejects_selected_factor_method_disagreement(tmp_path):
+    path = _write_approval(tmp_path)
+    selection = tmp_path / "candidate_20f" / "selection" / "fold3" / "selected_factors.json"
+    payload = json.loads(selection.read_text(encoding="utf-8"))
+    payload["selected_factors"] = list(reversed(payload["selected_factors"]))
+    selection.write_text(json.dumps(payload), encoding="utf-8")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["factor_selection_id"] = allocate._file_id(selection)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="selected-factor bundle"):
         load_research_approval(path)
 
 

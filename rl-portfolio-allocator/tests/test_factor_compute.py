@@ -556,3 +556,18 @@ def test_panel_cleans_nonfinite_ret_1d_after_zero_to_positive_recovery(
 
     assert not np.isinf(numeric).any()
     assert pd.isna(panel.loc[panel["trade_date"] == recovery_date, "ret_1d"]).all()
+
+
+def test_panel_accepts_integer_volume_and_amount_columns(
+    multi_symbol_prices: pd.DataFrame,
+) -> None:
+    prices = multi_symbol_prices.copy()
+    prices["volume"] = prices["volume"].astype(np.int64)
+    prices["amount"] = prices["amount"].astype(np.int64)
+
+    panel = compute_factor_panel(prices)
+
+    assert panel["volume"].dtype == np.dtype("int64")
+    assert panel["amount"].dtype == np.dtype("int64")
+    factor_names = [spec.name for spec in FACTOR_CATALOG]
+    assert panel[factor_names].dtypes.eq(np.dtype("float32")).all()

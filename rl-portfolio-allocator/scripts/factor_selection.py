@@ -274,13 +274,17 @@ def _weekly_factor_series(
 
         returns_by_date: dict[pd.Timestamp, np.ndarray] = {}
         invalid_week = False
+        held = (previous_target != 0.0) | (target != 0.0)
         for settlement_date in settlement_dates:
             day = df.loc[df["trade_date"] == settlement_date].set_index("symbol").reindex(universe)
-            if day["ret_1d"].isna().any() or not np.isfinite(day["ret_1d"].to_numpy(dtype=float)).all():
-                invalid_week = True
-                break
             values = day["ret_1d"].to_numpy(dtype=float)
             values[day["is_suspended"].to_numpy(dtype=bool)] = 0.0
+            # Only held names need real returns; a non-held symbol with missing
+            # ret_1d (e.g. its first panel row) cannot affect the portfolio.
+            if not np.isfinite(values[held]).all():
+                invalid_week = True
+                break
+            values[~np.isfinite(values)] = 0.0
             returns_by_date[pd.Timestamp(settlement_date)] = values
         if invalid_week:
             record_failure(decision_date, "invalid_week")
@@ -410,7 +414,17 @@ def _factor_metrics(
     ret_finite = _finite(df["ret_1d"])
     base_count = int(eligible.sum())
     coverage = float((eligible.to_numpy() & factor_finite & ret_finite).sum() / base_count) if base_count else 0.0
-    had_nonfinite = bool((eligible.to_numpy() & ~(factor_finite & ret_finite)).any())
+    # Infinity is a hard failure; ordinary NaN (e.g. a symbol's first panel row
+    # or rolling warmup) is quantified by the coverage gate and masked per date.
+    had_nonfinite = bool(
+        (
+            eligible.to_numpy()
+            & (
+                np.isinf(df[factor].to_numpy(dtype=np.float64, copy=False))
+                | np.isinf(df["ret_1d"].to_numpy(dtype=np.float64, copy=False))
+            )
+        ).any()
+    )
 
     daily_ics: list[float] = []
     ic_by_date: list[tuple[pd.Timestamp, float]] = []

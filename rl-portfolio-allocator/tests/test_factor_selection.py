@@ -844,3 +844,32 @@ def test_percentile_scores_are_deterministic_and_exclude_failed_or_incomplete_ca
     assert set(scores) == {"a", "b"}
     assert scores == reordered
     assert scores["a"] > scores["b"]
+
+
+def test_warmup_nan_does_not_fail_non_finite_but_inf_does(candidate_panel):
+    panel = candidate_panel.copy()
+    # Rolling warmup: first rows per symbol are NaN, like real data.
+    panel.loc[panel.groupby("symbol").head(3).index, "f1"] = np.nan
+    metrics = compute_factor_metrics(panel, ["f1"], "2018-01-01", "2019-12-31", _cfg())
+    assert "non_finite_values" not in metrics["f1"]["failure_reasons"]
+
+    with_inf = candidate_panel.copy()
+    with_inf.loc[with_inf.index[100], "f1"] = np.inf
+    metrics_inf = compute_factor_metrics(with_inf, ["f1"], "2018-01-01", "2019-12-31", _cfg())
+    assert "non_finite_values" in metrics_inf["f1"]["failure_reasons"]
+
+
+def test_missing_return_for_never_held_symbol_does_not_invalidate_week(candidate_panel):
+    # S050 has the exact median signal every date, so the 50/50 long-short
+    # never holds it; its missing ret_1d must not invalidate the week.
+    panel = candidate_panel.copy()
+    mid = panel["symbol"] == "S050"
+    drop_dates = panel.loc[mid, "trade_date"].iloc[40:80]
+    mask = mid & panel["trade_date"].isin(drop_dates)
+    panel.loc[mask, "ret_1d"] = np.nan
+    metrics = compute_factor_metrics(panel, ["f1"], "2018-01-01", "2019-12-31", _cfg())
+    reasons = metrics["f1"]["failure_reasons"]
+    assert "invalid_week" not in reasons
+    assert "no_valid_weekly_data" not in reasons
+    assert "weekly_data" not in reasons
+    assert metrics["f1"]["weekly_net_returns"]

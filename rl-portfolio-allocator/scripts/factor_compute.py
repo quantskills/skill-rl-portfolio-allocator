@@ -43,12 +43,16 @@ def rolling_corr(left: pd.Series, right: pd.Series, window: int) -> pd.Series:
 
 def downside_std(rets: pd.Series, window: int) -> pd.Series:
     """Calculate trailing standard deviation of negative returns only."""
-    return rets.where(rets < 0).rolling(window, min_periods=window).std()
+    result = rets.where(rets < 0).rolling(window, min_periods=2).std()
+    result.iloc[: window - 1] = np.nan
+    return result
 
 
 def upside_std(rets: pd.Series, window: int) -> pd.Series:
     """Calculate trailing standard deviation of positive returns only."""
-    return rets.where(rets > 0).rolling(window, min_periods=window).std()
+    result = rets.where(rets > 0).rolling(window, min_periods=2).std()
+    result.iloc[: window - 1] = np.nan
+    return result
 
 
 def _rolling_mean(series: pd.Series, window: int) -> pd.Series:
@@ -521,7 +525,9 @@ def compute_factor_panel(prices: pd.DataFrame) -> pd.DataFrame:
         raw[name] = normalized.clip(-3.0, 3.0).astype(np.float32)
         raw[name] = raw[name].where(np.isfinite(raw[name]))
 
-    numeric_columns = raw.select_dtypes(include=[np.number]).columns
+    # Only floating columns can hold non-finite values; assigning NaN into an
+    # integer numpy array raises even when the mask selects nothing.
+    numeric_columns = raw.select_dtypes(include=[np.floating]).columns
     for column in numeric_columns:
         values = raw[column].to_numpy(copy=True)
         values[~np.isfinite(values)] = np.nan

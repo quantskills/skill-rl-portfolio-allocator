@@ -7,6 +7,7 @@ import json
 import pathlib
 import shutil
 import sys
+import tempfile
 import uuid
 from collections import defaultdict
 from statistics import median
@@ -131,12 +132,15 @@ def artifact_id(path: pathlib.Path) -> str:
 
 def write_approval(run_root: pathlib.Path, method: dict, gate_report: dict,
                    run_id: str, created_at: str, *, run_mode: str = "full",
-                   fold_count: int | None = None, seed_count: int | None = None):
+                   fold_count: int | None = None, seed_count: int | None = None,
+                   selection_artifact_path=None):
     if gate_report.get("research_ok") is not True:
         return None
     from scripts.train import require_factor_contract
 
     require_factor_contract(method, context="approved method")
+    if selection_artifact_path is None:
+        raise ValueError("approval requires the persisted selected-factor artifact")
     run_root.mkdir(parents=True, exist_ok=True)
     method_path = run_root / "method.json"
     gates_path = run_root / "gates.json"
@@ -146,6 +150,14 @@ def write_approval(run_root: pathlib.Path, method: dict, gate_report: dict,
     comparison_id = artifact_id(comparison_path)
     if gate_report.get("comparison_path") != "comparison.json" or gate_report.get("comparison_id") != comparison_id:
         raise ValueError("approval gates must bind comparison.json evidence")
+    selection_path = pathlib.Path(selection_artifact_path)
+    if not selection_path.is_file():
+        raise FileNotFoundError("approval requires persisted selected factors: "
+                                f"{selection_path}")
+    try:
+        selection_reference = selection_path.resolve().relative_to(run_root.resolve())
+    except ValueError:
+        raise ValueError("selected-factor artifact must live inside the run root") from None
     method_path.write_text(json.dumps(_jsonable(method), indent=2, sort_keys=True), encoding="utf-8")
     gates_path.write_text(json.dumps(_jsonable(gate_report), indent=2, sort_keys=True), encoding="utf-8")
     approval = {
@@ -154,6 +166,8 @@ def write_approval(run_root: pathlib.Path, method: dict, gate_report: dict,
         "method_id": frozen_method_id(method), "method_path": "method.json",
         "gates_path": "gates.json", "run_id": run_id, "created_at": created_at,
         "comparison_path": "comparison.json", "comparison_id": comparison_id,
+        "factor_selection_path": str(selection_reference),
+        "factor_selection_id": artifact_id(selection_path),
         "run_mode": run_mode, "fold_count": fold_count, "seed_count": seed_count,
     }
     path = run_root / "approval.json"
@@ -295,6 +309,90 @@ def _default_fold_selector(*, panel, fold, cfg):
     return result, metrics, {"return_corr": correlations, "cross_section_corr": correlations}
 
 
+_SELECTION_CACHE_VERSION = 1  # bump when factor metrics or selection logic changes
+
+
+def _selection_cache_entry(cache_root, fold, cfg) -> pathlib.Path | None:
+    """Content-keyed cache entry covering inputs, fold window, config, and code version."""
+    try:
+        catalog = json.loads(
+            (pathlib.Path(cache_root) / "catalog.json").read_text(encoding="utf-8")
+        )
+        payload = {
+            "version": _SELECTION_CACHE_VERSION,
+            "catalog_hash": catalog_hash(FACTOR_CATALOG),
+            "train": [str(fold.train[0]), str(fold.train[1])],
+            "row_count": catalog["row_count"],
+            "file_hashes": catalog["file_hashes"],
+            "cfg": _jsonable(dict(cfg)),
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+    key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return pathlib.Path(cache_root).parent / "selection_cache" / key
+
+
+def _read_selection_cache(cache_root, fold, cfg):
+    """Return the cached selector output, or None on any miss or inconsistency."""
+    entry = _selection_cache_entry(cache_root, fold, cfg)
+    if entry is None:
+        return None
+    from scripts.factor_selection import SelectionResult
+
+    try:
+        selected_payload = json.loads((entry / "selected.json").read_text(encoding="utf-8"))
+        metrics = json.loads((entry / "metrics.json").read_text(encoding="utf-8"))
+        correlations = pd.read_parquet(entry / "correlations.parquet")
+        result = SelectionResult(
+            selected=tuple(dict(item) for item in selected_payload["selected"]),
+            relaxation_log=tuple(dict(item) for item in selected_payload["relaxation_log"]),
+            final_family_cap=int(selected_payload["final_family_cap"]),
+            final_correlation_ceiling=float(selected_payload["final_correlation_ceiling"]),
+            catalog_hash=str(selected_payload["catalog_hash"]),
+        )
+        if result.catalog_hash != catalog_hash(FACTOR_CATALOG):
+            return None
+        if not isinstance(metrics, dict) or not metrics:
+            return None
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
+    return result, metrics, {"return_corr": correlations, "cross_section_corr": correlations}
+
+
+def _write_selection_cache(cache_root, fold, cfg, selection) -> None:
+    """Best-effort cache write; a failure only means the next run recomputes."""
+    entry = _selection_cache_entry(cache_root, fold, cfg)
+    if entry is None:
+        return
+    try:
+        result, metrics, correlations = selection
+        frame = correlations["return_corr"]
+        if not isinstance(frame, pd.DataFrame):
+            return
+        root = entry.parent
+        root.mkdir(parents=True, exist_ok=True)
+        stage = pathlib.Path(tempfile.mkdtemp(prefix=f".{entry.name}.", dir=str(root)))
+        try:
+            _write(stage / "selected.json", {
+                "selected": list(result.selected),
+                "relaxation_log": list(result.relaxation_log),
+                "final_family_cap": result.final_family_cap,
+                "final_correlation_ceiling": result.final_correlation_ceiling,
+                "catalog_hash": result.catalog_hash,
+            })
+            _write(stage / "metrics.json", metrics)
+            frame.to_parquet(stage / "correlations.parquet", index=True)
+            if entry.exists():
+                shutil.rmtree(entry)
+            stage.rename(entry)
+        except Exception:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+    except Exception:  # cache writes must never break a run
+        return
+
+
 def prepare_fold_factors(*, fold, cache_root, index_returns, selection_root,
                          feature_root, state_root, cfg, overwrite_selection=False,
                          selector=None, candidate_cache=None,
@@ -306,14 +404,19 @@ def prepare_fold_factors(*, fold, cache_root, index_returns, selection_root,
         names = ", ".join(sorted(forbidden_dependencies))
         raise ValueError(f"{names} must be passed explicitly to prepare_fold_factors")
     cfg = _FrozenDict(cfg)
-    all_candidates = [{"name": spec.name, "direction": 1} for spec in FACTOR_CATALOG]
-    full_panel = _cache_panel(candidate_cache, cache_root, all_candidates)
-    dates = pd.to_datetime(full_panel["trade_date"])
-    train_panel = full_panel.loc[
-        (dates >= pd.Timestamp(fold.train[0])) & (dates <= pd.Timestamp(fold.train[1]) )
-    ].copy()
     selector = selector or _default_fold_selector
-    selected = selector(panel=train_panel, fold=fold, cfg=cfg)
+    cacheable = selector is _default_fold_selector and candidate_cache is None and cache_root is not None
+    selected = _read_selection_cache(cache_root, fold, cfg) if cacheable else None
+    if selected is None:
+        all_candidates = [{"name": spec.name, "direction": 1} for spec in FACTOR_CATALOG]
+        full_panel = _cache_panel(candidate_cache, cache_root, all_candidates)
+        dates = pd.to_datetime(full_panel["trade_date"])
+        train_panel = full_panel.loc[
+            (dates >= pd.Timestamp(fold.train[0])) & (dates <= pd.Timestamp(fold.train[1]) )
+        ].copy()
+        selected = selector(panel=train_panel, fold=fold, cfg=cfg)
+        if cacheable:
+            _write_selection_cache(cache_root, fold, cfg, selected)
     selection_details = None
     if isinstance(selected, tuple) and selected and not isinstance(selected[0], dict):
         selected, *selection_details = selected
@@ -872,10 +975,14 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
     gate_report["comparison_id"] = artifact_id(run_root / "comparison.json")
     _write(run_root / "gates.json", gate_report)
     if not smoke:
-        method = method_by_fold.get(str(selected_folds[0].fold), {})
+        approved_fold = selected_folds[0]
+        method = method_by_fold.get(str(approved_fold.fold), {})
         write_approval(
             run_root, method, gate_report, run_id, "", run_mode="full",
             fold_count=len(selected_folds), seed_count=len(selected_seeds),
+            selection_artifact_path=(
+                prepared_folds[approved_fold.fold].factor_bundle["selection_artifact_path"]
+            ),
         )
     summary["research_summary"] = research_summary
     summary["gates"] = gate_report

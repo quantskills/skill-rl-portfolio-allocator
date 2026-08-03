@@ -35,6 +35,22 @@ run_coverage() {
 
 run_tests() { (cd "$WORK_DIR" && "$PYTHON_BIN" -m pytest -q); }
 
+data_cache_ready() {
+    [[ -f "$WORK_DIR/data/features.parquet" \
+        && -f "$WORK_DIR/data/index_returns.parquet" \
+        && -f "$WORK_DIR/data/market_state.parquet" \
+        && -f "$WORK_DIR/data/factors/catalog.json" ]]
+}
+
+run_raw_data_and_factor_cache() {
+    if [[ "${RLPA_REFRESH_DATA:-0}" != "1" ]] && data_cache_ready; then
+        log "raw data and factor cache present; skipping regeneration (RLPA_REFRESH_DATA=1 rebuilds)"
+        return 0
+    fi
+    run_features
+    run_market_state
+}
+
 run_walk_forward() {
     local mode="$1"
     local marker
@@ -78,11 +94,12 @@ PY
 
 run_stress() {
     local run_root="${1:-}"
+    local timesteps="${2:-100000}"
     local method="${run_root}/summary.json"
     local report="${run_root}/stress.json"
     [[ -f "$method" ]] || die "walk-forward summary missing: $method"
     (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.stress_test \
-        --method "$method" --report "$report")
+        --method "$method" --report "$report" --timesteps "$timesteps")
 }
 
 run_publish() {
@@ -129,18 +146,18 @@ PY
 run_research() {
     local mode="$1"
     local wf_mode="$2"
-    run_features
-    run_market_state
+    run_raw_data_and_factor_cache
     run_coverage
     run_tests
     run_walk_forward "$wf_mode"
     local gate_status=0
     if [[ "$mode" == "smoke" ]]; then
         run_research_gates "${LAST_RUN_ROOT#"$WORK_DIR/"}" true || gate_status=$?
+        run_stress "$LAST_RUN_ROOT" 128
     else
         run_research_gates "${LAST_RUN_ROOT#"$WORK_DIR/"}" false || gate_status=$?
+        run_stress "$LAST_RUN_ROOT"
     fi
-    run_stress "$LAST_RUN_ROOT"
     return "$gate_status"
 }
 
@@ -150,8 +167,12 @@ Usage: ./run_pipeline.sh [--all | --research-smoke | --research-full | --publish
 
 Research (fail-closed):
   --all             Alias for --research-smoke; never publishes production files.
-  --research-smoke  features -> market_state -> coverage -> pytest -> walk-forward smoke -> gate -> stress.
-  --research-full   Same sequence with all configured folds and seeds.
+  --research-smoke  raw data + factor cache -> coverage -> pytest -> fold-local
+                    control/candidate walk-forward smoke -> comparison gates ->
+                    frozen-method stress. Existing data/factor caches are reused
+                    unless RLPA_REFRESH_DATA=1 is set.
+  --research-full   Same sequence with all configured folds and seeds; only a
+                    passing full run may write an approval record.
 
 Production (explicit approval required):
   --publish --approval PATH

@@ -185,6 +185,26 @@ def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
     return out
 
 
+def _frozen_fold_inputs(method_path: str, method: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load the fold-frozen inputs that produced the frozen method.
+
+    The global data caches only carry the legacy static factor set; a frozen
+    walk-forward method selects its own factor bundle, so stress evaluation
+    must read the same fold-frozen features/market state the walk-forward run
+    used internally.
+    """
+    run_root = pathlib.Path(method_path).resolve().parent
+    fold = method.get("fold")
+    if isinstance(fold, bool) or not isinstance(fold, int):
+        raise ValueError("frozen method artifact must contain an integer fold")
+    features_path = run_root / "candidate_20f" / "features" / f"fold{fold}.parquet"
+    state_path = run_root / "candidate_20f" / "state" / f"fold{fold}.parquet"
+    for path in (features_path, state_path):
+        if not path.is_file():
+            raise FileNotFoundError(f"frozen fold input missing: {path}")
+    return pd.read_parquet(features_path), pd.read_parquet(state_path)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--timesteps", type=int, default=100_000)
@@ -195,9 +215,12 @@ def main() -> None:
     args = p.parse_args()
     cfg = get_config()
     root = pathlib.Path(__file__).resolve().parent.parent
-    feats = pd.read_parquet(root / "data" / "features.parquet")
-    market_state = pd.read_parquet(root / "data" / "market_state.parquet")
     method = load_frozen_method(args.method) if args.method else None
+    if method is not None:
+        feats, market_state = _frozen_fold_inputs(args.method, method)
+    else:
+        feats = pd.read_parquet(root / "data" / "features.parquet")
+        market_state = pd.read_parquet(root / "data" / "market_state.parquet")
     results = run_all_stress(feats, market_state, cfg, timesteps=args.timesteps, method=method)
     if args.report:
         pathlib.Path(args.report).parent.mkdir(parents=True, exist_ok=True)

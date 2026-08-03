@@ -614,6 +614,12 @@ def test_full_run_accepts_explicit_run_id_and_writes_full_approval(tmp_path, mon
     assert approval["comparison_id"] == walk_forward.artifact_id(
         tmp_path / "full-run-001" / "comparison.json"
     )
+    assert approval["factor_selection_path"] == (
+        "candidate_20f/selection/fold1/selected_factors.json"
+    )
+    assert approval["factor_selection_id"] == walk_forward.artifact_id(
+        tmp_path / "full-run-001" / approval["factor_selection_path"]
+    )
 
 
 def test_walk_forward_writes_paired_branch_artifacts_and_comparison(tmp_path, monkeypatch):
@@ -1099,3 +1105,19 @@ def test_walk_forward_rejects_trainer_result_without_artifact_evidence(tmp_path)
             coverage_checker=lambda: None, cfg=_contract_cfg(),
             **_factor_inputs(tmp_path),
         )
+
+
+def test_smoke_never_writes_factor_approval(tmp_path):
+    def trainer(**kwargs):
+        return _trainer_artifacts(kwargs, val_sharpe=1.0)
+
+    def tester(**kwargs):
+        return {"test_sharpe": 1.0}
+
+    run_walk_forward(
+        folds=[default_folds()[0]], output_root=tmp_path, smoke=True,
+        trainer=trainer, tester=tester, coverage_checker=lambda: None,
+        cfg=_contract_cfg(), **_factor_inputs(tmp_path),
+    )
+
+    assert not (tmp_path / "smoke" / "approval.json").exists()

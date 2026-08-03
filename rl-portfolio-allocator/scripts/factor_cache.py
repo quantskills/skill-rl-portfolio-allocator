@@ -463,14 +463,21 @@ def materialize_selected_panel(root: Path, selected: list[dict]) -> pd.DataFrame
         family_frames[family] = family_frame.set_index(list(KEY_COLUMNS))
 
     result = base.loc[:, list(BASE_COLUMNS)].copy()
+    factor_blocks: dict[str, pd.Series] = {}
     for name, direction in choices:
         family = next(spec.family for spec in FACTOR_CATALOG if spec.name == name)
         values = family_frames[family][name].reindex(base_keys)
         if len(values) != len(result):
             raise _error(f"{family} factor alignment failed: {name}")
-        result[name] = (values.to_numpy(dtype=np.float32, copy=False) * direction).astype(
-            np.float32, copy=False
+        factor_blocks[name] = pd.Series(
+            (values.to_numpy(dtype=np.float32, copy=False) * direction).astype(
+                np.float32, copy=False
+            ),
+            index=result.index,
+            name=name,
         )
+    if factor_blocks:
+        result = pd.concat([result, pd.DataFrame(factor_blocks)], axis=1)
     return result
 
 

@@ -45,6 +45,14 @@ def test_passing_gate_writes_hashed_approval(tmp_path):
     }
     comparison = tmp_path / "comparison.json"
     comparison.write_text("{}", encoding="utf-8")
+    selection = tmp_path / "candidate_20f" / "selection" / "fold3" / "selected_factors.json"
+    selection.parent.mkdir(parents=True)
+    selection.write_text(json.dumps({
+        "fold": 3,
+        "selected_factors": [
+            {"name": name, "direction": 1} for name in FACTOR_NAMES
+        ],
+    }), encoding="utf-8")
     report = {
         "research_ok": True,
         "gates": [],
@@ -52,8 +60,13 @@ def test_passing_gate_writes_hashed_approval(tmp_path):
         "comparison_id": __import__("scripts.walk_forward", fromlist=["artifact_id"])
         .artifact_id(comparison),
     }
-    path = write_approval(tmp_path, method, report, "run1", "now")
+    path = write_approval(
+        tmp_path, method, report, "run1", "now", selection_artifact_path=selection
+    )
     assert path.exists()
     approval = json.loads(path.read_text())
     assert approval["method_id"] == frozen_method_id(method)
+    assert approval["factor_selection_path"] == (
+        "candidate_20f/selection/fold3/selected_factors.json"
+    )
     assert json.loads((tmp_path / "gates.json").read_text())["research_ok"] is True
