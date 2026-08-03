@@ -39,6 +39,11 @@ DUAL_LR: float = 0.05
 RECOVERY_CREDIT: float = 0.1
 DOWNSIDE_VOL_COEFF: float = 0.2
 
+EPISODE_MIN_WEEKS: int = 52
+EPISODE_MAX_WEEKS: int = 156
+CRISIS_OVERSAMPLE_WEIGHT: float = 3.0
+ENT_COEF: float = 0.02
+
 STRATEGY_ID: str = "RLPA"
 DATA_VERSION: str = "real-v1"
 
@@ -72,6 +77,10 @@ def get_config() -> dict:
         "dual_lr": float(os.environ.get("RLPA_DUAL_LR", DUAL_LR)),
         "recovery_credit": float(os.environ.get("RLPA_RECOVERY_CREDIT", RECOVERY_CREDIT)),
         "downside_vol_coeff": float(os.environ.get("RLPA_DOWNSIDE_VOL_COEFF", DOWNSIDE_VOL_COEFF)),
+        "episode_min_weeks": int(os.environ.get("RLPA_EPISODE_MIN_WEEKS", EPISODE_MIN_WEEKS)),
+        "episode_max_weeks": int(os.environ.get("RLPA_EPISODE_MAX_WEEKS", EPISODE_MAX_WEEKS)),
+        "crisis_oversample_weight": float(os.environ.get("RLPA_CRISIS_OVERSAMPLE_WEIGHT", CRISIS_OVERSAMPLE_WEIGHT)),
+        "ent_coef": float(os.environ.get("RLPA_ENT_COEF", ENT_COEF)),
         "selection_target_count": int(os.environ.get("RLPA_SELECTION_TARGET_COUNT", "20")),
         "reward_variant": reward_variant,
         "reward_ret_weight": float(os.environ.get("REWARD_RET_WEIGHT", "1.0")),

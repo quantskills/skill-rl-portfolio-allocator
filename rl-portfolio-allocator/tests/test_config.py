@@ -34,3 +34,23 @@ def test_unknown_reward_variant_is_rejected(monkeypatch):
 
 def test_reward_ret_weight_default():
     assert get_config()["reward_ret_weight"] == 1.0
+
+
+def test_episode_randomization_defaults():
+    cfg = get_config()
+    assert cfg["episode_min_weeks"] == 52
+    assert cfg["episode_max_weeks"] == 156
+    assert cfg["crisis_oversample_weight"] == 3.0
+    assert cfg["ent_coef"] == 0.02
+
+
+def test_episode_randomization_env_overrides(monkeypatch):
+    monkeypatch.setenv("RLPA_EPISODE_MIN_WEEKS", "26")
+    monkeypatch.setenv("RLPA_EPISODE_MAX_WEEKS", "104")
+    monkeypatch.setenv("RLPA_CRISIS_OVERSAMPLE_WEIGHT", "5.0")
+    monkeypatch.setenv("RLPA_ENT_COEF", "0.01")
+    cfg = get_config()
+    assert cfg["episode_min_weeks"] == 26
+    assert cfg["episode_max_weeks"] == 104
+    assert cfg["crisis_oversample_weight"] == 5.0
+    assert cfg["ent_coef"] == 0.01

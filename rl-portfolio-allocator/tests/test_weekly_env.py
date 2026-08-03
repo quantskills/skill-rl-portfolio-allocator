@@ -133,6 +133,61 @@ def test_settlement_helper_charges_trade_cost_once_and_borrow_daily():
     assert len(result["daily_net_rets"]) == 3
 
 
+def test_episode_start_weights_oversample_crisis_segments():
+    from scripts.env import CRISIS_SEGMENTS, episode_start_weights
+    dates = [pd.Timestamp("2015-01-05"), pd.Timestamp("2015-07-06"),
+             pd.Timestamp("2018-06-04"), pd.Timestamp("2019-01-07"),
+             pd.Timestamp("2020-03-02"), pd.Timestamp("2022-06-06")]
+    weights = episode_start_weights(dates)
+    assert weights.tolist() == [1.0, 3.0, 3.0, 1.0, 3.0, 3.0]
+    assert CRISIS_SEGMENTS == (
+        ("2015-06-01", "2015-09-30"),
+        ("2018-01-01", "2018-12-31"),
+        ("2020-02-01", "2020-04-30"),
+        ("2022-01-01", "2022-12-31"),
+    )
+
+
+def _randomized_env(cfg_overrides=None):
+    features, state = _toy_data(periods=15)
+    cfg = get_config()
+    cfg.update({"episode_min_weeks": 1, "episode_max_weeks": 2,
+                "crisis_oversample_weight": 3.0, "episode_randomization": True})
+    cfg.update(cfg_overrides or {})
+    return PortfolioEnv(features, state, cfg,
+                        features["trade_date"].min(), features["trade_date"].max())
+
+
+def test_randomized_reset_is_reproducible_per_seed():
+    env = _randomized_env()
+    env.reset(seed=7)
+    first = (env.t, env.episode_end)
+    env.reset(seed=7)
+    assert (env.t, env.episode_end) == first
+    assert 0 <= env.t < env.episode_end <= len(env.decision_dates) - 1
+    assert env.episode_end - env.t <= 2  # episode_max_weeks
+
+
+def test_randomized_episode_terminates_at_sampled_end():
+    env = _randomized_env()
+    env.reset(seed=3)
+    expected_steps = env.episode_end - env.t
+    k = len(env.cfg["factor_names"])
+    steps, done = 0, False
+    while not done:
+        _, _, term, trunc, _ = env.step(np.zeros(k, dtype=np.float32))
+        steps += 1
+        done = term or trunc
+    assert steps == expected_steps
+
+
+def test_short_window_falls_back_to_full_episode():
+    env = _randomized_env({"episode_min_weeks": 52, "episode_max_weeks": 156})
+    env.reset(seed=0)
+    assert env.t == 0
+    assert env.episode_end == len(env.decision_dates) - 1
+
+
 def test_rollout_requires_weekly_daily_settlement_fields():
     from scripts.backtest import run_ppo_rollout
 

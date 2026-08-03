@@ -377,7 +377,7 @@ def train_ppo(env, total_timesteps: int, seed: int = 0, device: str = "auto",
               eval_freq: int = 10_000, n_eval_episodes: int = 1,
               patience: Optional[int] = None, callback=None,
               training_log_path=None, factor_contract: dict | None = None,
-              metadata_path=None):
+              metadata_path=None, ent_coef: float | None = None):
     contract = None
     if save_path:
         contract = require_factor_contract(
@@ -387,6 +387,9 @@ def train_ppo(env, total_timesteps: int, seed: int = 0, device: str = "auto",
     from stable_baselines3.common.vec_env import DummyVecEnv
     from stable_baselines3.common.monitor import Monitor
 
+    if ent_coef is None:
+        ent_coef = float(getattr(env, "cfg", {}).get("ent_coef", 0.02))
+
     def _mk():
         return Monitor(env)
 
@@ -395,7 +398,7 @@ def train_ppo(env, total_timesteps: int, seed: int = 0, device: str = "auto",
     model = PPO(
         "MlpPolicy", vec, verbose=0, seed=seed, device=dev,
         n_steps=1024, batch_size=256, learning_rate=3e-4,
-        gamma=0.99, gae_lambda=0.95, clip_range=0.2, ent_coef=0.01,
+        gamma=0.99, gae_lambda=0.95, clip_range=0.2, ent_coef=ent_coef,
     )
 
     callbacks = []

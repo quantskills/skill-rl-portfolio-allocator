@@ -26,6 +26,25 @@ from scripts.state import StateBuilder, exogenous_fields, state_dim
 from scripts.rebalance import buffered_long_short, project_turnover, weekly_decision_indices
 
 
+CRISIS_SEGMENTS: tuple[tuple[str, str], ...] = (
+    ("2015-06-01", "2015-09-30"),
+    ("2018-01-01", "2018-12-31"),
+    ("2020-02-01", "2020-04-30"),
+    ("2022-01-01", "2022-12-31"),
+)
+
+
+def episode_start_weights(decision_dates, segments=CRISIS_SEGMENTS,
+                          crisis_weight: float = 3.0) -> np.ndarray:
+    """每个可行起点的采样权重:危机段 3× 超采样(仅落在该 fold 训练窗内的段会命中)。"""
+    ranges = [(pd.Timestamp(a), pd.Timestamp(b)) for a, b in segments]
+    weights = np.ones(len(decision_dates), dtype=float)
+    for i, date in enumerate(decision_dates):
+        if any(start <= pd.Timestamp(date) <= end for start, end in ranges):
+            weights[i] = crisis_weight
+    return weights
+
+
 def extract_settle_holding_period(prev_w, target_w, settlement_dates, returns_by_date, cfg):
     """Settle a target portfolio over a period, compounding daily net returns."""
     dates = list(pd.to_datetime(settlement_dates))
@@ -153,6 +172,7 @@ class PortfolioEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(state_dim(self.factor_names),), dtype=np.float32,
         )
         self.ood_mix_enabled = False
+        self.episode_randomization = bool(cfg.get("episode_randomization", False))
         self._reset_internal()
 
     def _scale(self, obs: np.ndarray) -> np.ndarray:
@@ -162,6 +182,7 @@ class PortfolioEnv(gym.Env):
 
     def _reset_internal(self):
         self.t = 0
+        self.episode_end = len(self.decision_dates) - 1
         self.prev_factor_w = np.zeros(self.k)
         self.prev_stock_w = np.zeros(self.n)
         self.dsr = DSRState()
@@ -177,9 +198,26 @@ class PortfolioEnv(gym.Env):
             recent_turnover_history=[],
         )
 
+    def _sample_episode_window(self) -> tuple[int, int]:
+        n = len(self.decision_dates)
+        min_w = int(self.cfg.get("episode_min_weeks", 52))
+        max_w = int(self.cfg.get("episode_max_weeks", 156))
+        if n - 1 <= min_w:
+            return 0, n - 1
+        latest_start = n - 1 - min_w
+        weights = episode_start_weights(
+            self.decision_dates[: latest_start + 1],
+            crisis_weight=float(self.cfg.get("crisis_oversample_weight", 3.0)),
+        )
+        start = int(self.np_random.choice(latest_start + 1, p=weights / weights.sum()))
+        length = int(self.np_random.integers(min_w, max_w + 1))
+        return start, min(start + length, n - 1)
+
     def reset(self, seed: Optional[int] = None, options=None):
         super().reset(seed=seed)
         self._reset_internal()
+        if self.episode_randomization:
+            self.t, self.episode_end = self._sample_episode_window()
         obs = self.state_builder.build(
             self.decision_dates[self.t], self.prev_stock_w, self.factor_names,
             self.prev_factor_w, cash=1.0,
@@ -233,7 +271,7 @@ class PortfolioEnv(gym.Env):
         costs = settled["costs"]
         gross = settled["gross_ret"]
         net = settled["net_ret"]
-        terminated = next_t >= len(self.decision_dates) - 1
+        terminated = next_t >= self.episode_end
         truncated = False
         turnover = float(np.abs(target_w - self.prev_stock_w).sum())
         long_notional = float(np.clip(target_w, 0, None).sum())

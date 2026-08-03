@@ -1051,6 +1051,7 @@ def _default_trainer(**kwargs) -> dict:
     )
     raw_env = PortfolioEnv(kwargs["features_df"], kwargs["market_state_df"], cfg,
                            *kwargs["train_range"])
+    raw_env.episode_randomization = True  # 仅训练 env;val/stress/backtest 保持全窗口确定性
     val_env = PortfolioEnv(kwargs["features_df"], kwargs["market_state_df"], cfg,
                            *kwargs["val_range"])
     artifact_dir = pathlib.Path(kwargs["artifact_dir"])

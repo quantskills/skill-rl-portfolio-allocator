@@ -33,8 +33,15 @@ def _toy_env():
 
 def test_train_ppo_accepts_eval_kwargs():
     sig = inspect.signature(train_ppo)
-    for p in ("eval_env", "eval_freq", "n_eval_episodes", "patience"):
+    for p in ("eval_env", "eval_freq", "n_eval_episodes", "patience", "ent_coef"):
         assert p in sig.parameters, f"missing param {p}"
+
+
+def test_train_ppo_ent_coef_defaults_to_env_cfg_and_explicit_override():
+    model = train_ppo(_toy_env(), total_timesteps=64, seed=0, device="cpu")
+    assert model.ent_coef == pytest.approx(0.02)
+    model = train_ppo(_toy_env(), total_timesteps=64, seed=0, device="cpu", ent_coef=0.05)
+    assert model.ent_coef == pytest.approx(0.05)
 
 
 def test_train_ppo_backward_compatible():
