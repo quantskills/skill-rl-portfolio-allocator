@@ -1071,12 +1071,12 @@ Do not automatically start the full run after implementation. It requires substa
 After smoke passes, report the command and estimated workload to the user:
 
 ```bash
-RLPA_RUN_ID=<explicit-run-id> bash ../run_pipeline.sh --research-full
+RLPA_RUN_ID=<explicit-run-id> bash run_pipeline.sh --research-full
 ```
 
 Only a full run whose `gates.json` has `research_ok=true` may write an approval. Publication remains a separate explicit command:
 
 ```bash
-bash ../run_pipeline.sh --publish --approval \
+bash run_pipeline.sh --publish --approval \
   rl-portfolio-allocator/artifacts/walk_forward/<run-id>/approval.json
 ```
