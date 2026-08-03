@@ -6,6 +6,7 @@ import numpy as np
 
 _REWARD_COEFFICIENTS = {
     "none": (0.0, 0.0, 0.0),
+    "gentle": (0.10, 0.20, 0.05),
     "low": (0.5, 0.5, 0.05),
     "medium": (1.0, 1.0, 0.10),
 }
@@ -51,6 +52,22 @@ def hhi(weights: np.ndarray) -> float:
     return float((p ** 2).sum())
 
 
+@dataclass
+class DualState:
+    """约束式 reward 的对偶变量:λ 随 episode 最大回撤相对目标自适应。
+
+    回撤远低于 target 时 λ 衰减到 0(不压多头,修复退化解);
+    回撤逼近/超过 target 时 λ 单调放大(防守力度自适应)。
+    """
+    lam: float = 0.0
+    episode_mdd: float = 0.0
+
+    def update(self, drawdown: float, target_mdd: float, lr_dual: float) -> float:
+        self.episode_mdd = max(self.episode_mdd, drawdown)
+        self.lam = max(0.0, self.lam + lr_dual * (self.episode_mdd - target_mdd))
+        return self.lam
+
+
 def compose_reward(
     net_ret: float, prev_drawdown: float, drawdown: float, turnover: float,
     hhi_val: float, cfg: dict,
@@ -68,6 +85,39 @@ def compose_reward(
         "incremental_drawdown_penalty": dd_penalty,
         "turnover_penalty": turnover_penalty,
         "concentration_penalty": concentration_penalty,
+        "total": total,
+    }
+
+
+def compose_constrained_reward(
+    net_ret: float, prev_drawdown: float, drawdown: float, turnover: float,
+    hhi_val: float, lam: float, cfg: dict,
+) -> tuple[float, dict]:
+    """约束式 reward:固定 dd_coeff 换成对偶变量 λ_t,加恢复信用与下行半方差。
+
+    total = 100·net_ret − λ_t·max(0, dd−prev_dd) + κ_rec·max(0, prev_dd−dd)
+            − σ_down·min(0, net_ret)² − 0.05·max(0, turnover−0.2) − 0.5·max(0, hhi−0.03)
+    """
+    _, concentration_coeff, turnover_coeff = reward_coefficients("low")
+    scaled_net_return = cfg["reward_scale"] * net_ret
+    dd_penalty = -lam * max(0.0, drawdown - prev_drawdown)
+    recovery_credit = cfg["recovery_credit"] * max(0.0, prev_drawdown - drawdown)
+    downside_penalty = -cfg["downside_vol_coeff"] * min(0.0, net_ret) ** 2
+    turnover_penalty = -turnover_coeff * max(0.0, turnover - cfg["turnover_budget"])
+    concentration_penalty = -concentration_coeff * max(0.0, hhi_val - cfg["hhi_target"])
+    raw_total = (
+        scaled_net_return + dd_penalty + recovery_credit
+        + downside_penalty + turnover_penalty + concentration_penalty
+    )
+    total = float(np.clip(raw_total, -cfg["reward_clip"], cfg["reward_clip"]))
+    return total, {
+        "scaled_net_return": scaled_net_return,
+        "incremental_drawdown_penalty": dd_penalty,
+        "recovery_credit": recovery_credit,
+        "downside_vol_penalty": downside_penalty,
+        "turnover_penalty": turnover_penalty,
+        "concentration_penalty": concentration_penalty,
+        "dual_lambda": float(lam),
         "total": total,
     }
 

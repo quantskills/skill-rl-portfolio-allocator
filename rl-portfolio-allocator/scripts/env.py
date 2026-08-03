@@ -18,7 +18,10 @@ from scripts.costs import total_costs
 from scripts.portfolio import (
     composite_score, select_long_short, target_weights, freeze_suspended
 )
-from scripts.reward import DSRState, hhi, compose_reward, compose_legacy_dsr_reward
+from scripts.reward import (
+    DSRState, DualState, hhi, compose_reward, compose_constrained_reward,
+    compose_legacy_dsr_reward,
+)
 from scripts.state import StateBuilder, exogenous_fields, state_dim
 from scripts.rebalance import buffered_long_short, project_turnover, weekly_decision_indices
 
@@ -161,6 +164,7 @@ class PortfolioEnv(gym.Env):
         self.prev_factor_w = np.zeros(self.k)
         self.prev_stock_w = np.zeros(self.n)
         self.dsr = DSRState()
+        self.dual = DualState()
         self.prev_drawdown = 0.0
         panels = {}
         for d, F in self._F_by_date.items():
@@ -233,6 +237,12 @@ class PortfolioEnv(gym.Env):
                 long_notional, short_notional, self.cfg["long_notional"],
                 self.cfg["short_notional_cap"],
             )
+        elif self.cfg["reward_variant"] == "constrained":
+            reward, parts = compose_constrained_reward(
+                net, self.prev_drawdown, drawdown, turnover, hhi_v,
+                self.dual.lam, self.cfg,
+            )
+            self.dual.update(drawdown, self.cfg["target_mdd"], self.cfg["dual_lr"])
         else:
             reward, parts = compose_reward(net, self.prev_drawdown, drawdown, turnover, hhi_v, self.cfg)
         self.prev_drawdown = drawdown

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import shutil
 import sys
@@ -176,7 +177,15 @@ def write_approval(run_root: pathlib.Path, method: dict, gate_report: dict,
 
 
 SEEDS = (0, 1, 2, 3, 4)
-REWARD_CANDIDATES = ("none", "low", "medium", "legacy_dsr")
+DEFAULT_REWARD_CANDIDATES = ("none", "gentle", "low", "constrained", "legacy_dsr")
+
+
+def reward_candidates() -> tuple[str, ...]:
+    """奖励候选集,可用 RLPA_REWARD_CANDIDATES 环境变量覆盖(逗号分隔)。"""
+    raw = os.environ.get("RLPA_REWARD_CANDIDATES")
+    if not raw:
+        return DEFAULT_REWARD_CANDIDATES
+    return tuple(name.strip() for name in raw.split(",") if name.strip())
 BUFFER_CANDIDATES = ("tight", "default", "wide")
 BUFFER_CONFIGS = {
     "tight": {"long_entry": 30, "long_exit": 40, "short_entry": 15, "short_exit": 25},
@@ -703,7 +712,8 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
             selection_root=candidate_root / "selection", feature_root=candidate_root / "features",
             state_root=candidate_root / "state", cfg=runtime_cfg, overwrite_selection=smoke,
             selector=selector, candidate_cache=candidate_cache,
-            expected_factor_count=20, factor_bundle_name="candidate",
+            expected_factor_count=int(runtime_cfg.get("selection_target_count", 20)),
+            factor_bundle_name="candidate",
         )
     control_folds = {
         fold.fold: prepare_control_fold_factors(
@@ -766,7 +776,7 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
         fold_inputs = prepared_folds[fold.fold]
         factor_bundle = fold_inputs.factor_bundle
         fold_cfg = fold_runtime_cfgs[fold.fold]
-        for reward in REWARD_CANDIDATES:
+        for reward in reward_candidates():
             for seed in selected_seeds:
                 fold_features, fold_state = _fold_input_copies(fold_inputs)
                 result = _invoke_trainer(

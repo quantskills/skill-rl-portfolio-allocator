@@ -23,7 +23,7 @@ def _toy_market_state(dates):
     return pd.DataFrame(0.1, index=pd.DatetimeIndex(dates), columns=exogenous_fields(FACTOR_NAMES))
 
 
-@pytest.mark.parametrize("variant", ["none", "low", "medium"])
+@pytest.mark.parametrize("variant", ["none", "low", "medium", "constrained"])
 def test_step_uses_default_reward_without_dsr_parts(variant):
     cfg = get_config()
     cfg["reward_variant"] = variant
@@ -37,6 +37,10 @@ def test_step_uses_default_reward_without_dsr_parts(variant):
     assert "dsr" not in info
     assert "dsr_metric" in info["diagnostics"]
     assert -5.0 <= reward <= 5.0
+    if variant == "constrained":
+        assert "dual_lambda" in info["reward_parts"]
+        assert "recovery_credit" in info["reward_parts"]
+        assert "downside_vol_penalty" in info["reward_parts"]
 
 
 def test_reset_initializes_previous_drawdown_and_toy_rollout_is_bounded():

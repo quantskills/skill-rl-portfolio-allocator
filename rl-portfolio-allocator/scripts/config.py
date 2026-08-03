@@ -34,6 +34,10 @@ REWARD_SCALE: float = 100.0
 REWARD_CLIP: float = 5.0
 HHI_TARGET: float = 0.03
 TURNOVER_BUDGET: float = 0.20
+TARGET_MDD: float = 0.10
+DUAL_LR: float = 0.05
+RECOVERY_CREDIT: float = 0.1
+DOWNSIDE_VOL_COEFF: float = 0.2
 
 STRATEGY_ID: str = "RLPA"
 DATA_VERSION: str = "real-v1"
@@ -41,7 +45,7 @@ DATA_VERSION: str = "real-v1"
 
 def get_config() -> dict:
     reward_variant = os.environ.get("REWARD_VARIANT", "low")
-    if reward_variant not in {"none", "low", "medium", "legacy_dsr"}:
+    if reward_variant not in {"none", "gentle", "low", "medium", "legacy_dsr", "constrained"}:
         raise ValueError(f"unknown reward variant: {reward_variant}")
     return {
         "factor_names": list(CONTROL_FACTOR_NAMES),
@@ -61,9 +65,14 @@ def get_config() -> dict:
         "reward_clip": REWARD_CLIP,
         "hhi_target": HHI_TARGET,
         "turnover_budget": TURNOVER_BUDGET,
-        "lambda_drawdown": 0.5,
-        "lambda_turnover": LAMBDA_TURNOVER,
-        "lambda_concentration": LAMBDA_CONCENTRATION,
+        "lambda_drawdown": float(os.environ.get("RLPA_LAMBDA_DRAWDOWN", LAMBDA_DRAWDOWN)),
+        "lambda_turnover": float(os.environ.get("RLPA_LAMBDA_TURNOVER", LAMBDA_TURNOVER)),
+        "lambda_concentration": float(os.environ.get("RLPA_LAMBDA_CONCENTRATION", LAMBDA_CONCENTRATION)),
+        "target_mdd": float(os.environ.get("RLPA_TARGET_MDD", TARGET_MDD)),
+        "dual_lr": float(os.environ.get("RLPA_DUAL_LR", DUAL_LR)),
+        "recovery_credit": float(os.environ.get("RLPA_RECOVERY_CREDIT", RECOVERY_CREDIT)),
+        "downside_vol_coeff": float(os.environ.get("RLPA_DOWNSIDE_VOL_COEFF", DOWNSIDE_VOL_COEFF)),
+        "selection_target_count": int(os.environ.get("RLPA_SELECTION_TARGET_COUNT", "20")),
         "reward_variant": reward_variant,
         "reward_ret_weight": float(os.environ.get("REWARD_RET_WEIGHT", "1.0")),
         "strategy_id": STRATEGY_ID,

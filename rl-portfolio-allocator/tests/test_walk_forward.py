@@ -10,9 +10,10 @@ import pytest
 from scripts.walk_forward import (
     BUFFER_CONFIGS,
     BUFFER_CANDIDATES,
-    REWARD_CANDIDATES,
+    DEFAULT_REWARD_CANDIDATES,
     SEEDS,
     default_folds,
+    reward_candidates,
     run_walk_forward,
     select_candidate_on_validation,
 )
@@ -150,13 +151,19 @@ def _simple_fold_market_state(monkeypatch):
 
 def test_constants_are_closed_and_buffer_configs_are_exact():
     assert SEEDS == (0, 1, 2, 3, 4)
-    assert REWARD_CANDIDATES == ("none", "low", "medium", "legacy_dsr")
+    assert DEFAULT_REWARD_CANDIDATES == ("none", "gentle", "low", "constrained", "legacy_dsr")
+    assert reward_candidates() == DEFAULT_REWARD_CANDIDATES
     assert BUFFER_CANDIDATES == ("tight", "default", "wide")
     assert BUFFER_CONFIGS == {
         "tight": {"long_entry": 30, "long_exit": 40, "short_entry": 15, "short_exit": 25},
         "default": {"long_entry": 30, "long_exit": 45, "short_entry": 15, "short_exit": 30},
         "wide": {"long_entry": 30, "long_exit": 60, "short_entry": 15, "short_exit": 45},
     }
+
+
+def test_reward_candidates_env_override(monkeypatch):
+    monkeypatch.setenv("RLPA_REWARD_CANDIDATES", "none, low, gentle")
+    assert reward_candidates() == ("none", "low", "gentle")
 
 
 def test_validation_selects_candidate_by_group_median_descending():
@@ -876,10 +883,10 @@ def test_repeated_smoke_removes_stale_test_artifacts_from_prior_candidate(tmp_pa
     stale_test = tmp_path / "smoke" / "candidate_20f" / "test" / "fold3" / "low__tight" / "seed0.json"
     assert stale_test.is_file()
 
-    selected.update(reward="medium", buffer="wide")
+    selected.update(reward="constrained", buffer="wide")
     run_walk_forward(**run_args)
 
-    fresh_test = tmp_path / "smoke" / "candidate_20f" / "test" / "fold3" / "medium__wide" / "seed0.json"
+    fresh_test = tmp_path / "smoke" / "candidate_20f" / "test" / "fold3" / "constrained__wide" / "seed0.json"
     assert fresh_test.is_file()
     assert not stale_test.exists()
 

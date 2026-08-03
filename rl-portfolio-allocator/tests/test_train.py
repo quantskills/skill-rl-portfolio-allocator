@@ -139,3 +139,15 @@ def test_validation_callback_uses_daily_returns_and_requested_defaults():
     assert callback.eval_freq == 10000
     assert callback.patience == 5
     assert callback.deterministic is True
+
+
+def test_training_log_records_dual_lambda_for_constrained_variant(tmp_path):
+    env = _toy_env()
+    env.cfg["reward_variant"] = "constrained"
+    env.cfg.update({"target_mdd": 0.10, "dual_lr": 0.05,
+                    "recovery_credit": 0.1, "downside_vol_coeff": 0.2})
+    log_path = tmp_path / "train.jsonl"
+    train_ppo(env, total_timesteps=64, seed=0, device="cpu",
+              training_log_path=str(log_path))
+    records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+    assert any("dual_lambda_last" in record for record in records)

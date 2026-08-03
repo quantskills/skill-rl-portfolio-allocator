@@ -15,10 +15,15 @@ def test_reward_defaults():
     assert cfg["lambda_turnover"] == 0.05
 
 
-@pytest.mark.parametrize("variant", ["none", "low", "medium", "legacy_dsr"])
+@pytest.mark.parametrize("variant", ["none", "gentle", "low", "medium", "legacy_dsr", "constrained"])
 def test_reward_variant_from_environment(monkeypatch, variant):
     monkeypatch.setenv("REWARD_VARIANT", variant)
     assert get_config()["reward_variant"] == variant
+
+
+def test_constrained_variant_accepted(monkeypatch):
+    monkeypatch.setenv("REWARD_VARIANT", "constrained")
+    assert get_config()["reward_variant"] == "constrained"
 
 
 def test_unknown_reward_variant_is_rejected(monkeypatch):

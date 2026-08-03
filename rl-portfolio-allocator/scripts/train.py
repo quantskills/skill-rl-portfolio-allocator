@@ -243,6 +243,7 @@ class TrainingMetricsCallback(BaseCallback):
         super().__init__(verbose)
         self.log_path = pathlib.Path(log_path)
         self._actions = []
+        self._dual_lambdas: list[float] = []
 
     def _on_training_start(self):
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -252,6 +253,11 @@ class TrainingMetricsCallback(BaseCallback):
         actions = self.locals.get("actions")
         if actions is not None:
             self._actions.append(np.asarray(actions, dtype=float).reshape(-1))
+        infos = self.locals.get("infos")
+        if infos:
+            lam = infos[-1].get("reward_parts", {}).get("dual_lambda")
+            if lam is not None:
+                self._dual_lambdas.append(float(lam))
         return True
 
     def _on_rollout_end(self):
@@ -270,10 +276,13 @@ class TrainingMetricsCallback(BaseCallback):
             "action_mean": _json_number(np.mean(actions)) if actions.size else 0.0,
             "action_std": _json_number(np.std(actions)) if actions.size else 0.0,
             "action_saturation": _json_number(np.mean(np.abs(actions) >= 0.999)) if actions.size else 0.0,
+            "dual_lambda_last": _json_number(self._dual_lambdas[-1]) if self._dual_lambdas else None,
+            "dual_lambda_max": _json_number(max(self._dual_lambdas)) if self._dual_lambdas else None,
         }
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
         self._actions.clear()
+        self._dual_lambdas.clear()
 
     def _on_training_end(self):
         if not self.log_path.exists() or not self.log_path.read_text(encoding="utf-8").strip():
