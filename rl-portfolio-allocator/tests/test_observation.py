@@ -62,14 +62,66 @@ def test_scaler_fit_rejects_invalid_shape_or_values():
 def test_scaler_json_round_trip_and_metadata_validation(tmp_path):
     scaler = ObservationScaler.fit(np.array([[1.0, 2.0], [2.0, 4.0]]), "obs-v1", ("a", "b"))
     path = tmp_path / "scaler.json"
-    scaler.save(path)
+    factor_contract = {
+        "factor_catalog_version": "catalog-v1",
+        "factor_catalog_hash": "sha256:catalog",
+        "selected_factors": ["mom_20", "vol_20"],
+        "factor_directions": {"mom_20": 1, "vol_20": -1},
+        "selection_run_id": "selection-42",
+        "fold": 3,
+        "state_schema_version": "obs-v1",
+    }
+    scaler.save(path, factor_contract=factor_contract)
 
-    assert ObservationScaler.load(path, expected_schema="obs-v1", fields=("a", "b")) == scaler
+    assert ObservationScaler.load(
+        path,
+        expected_schema="obs-v1",
+        fields=("a", "b"),
+        expected_factor_contract={
+            **factor_contract,
+            "factor_directions": [1, -1],
+        },
+    ) == scaler
     with pytest.raises(ValueError, match="schema"):
-        ObservationScaler.load(path, expected_schema="obs-v2", fields=("a", "b"))
+        ObservationScaler.load(
+            path, expected_schema="obs-v2", fields=("a", "b"),
+            expected_factor_contract=factor_contract,
+        )
     with pytest.raises(ValueError, match="fields"):
-        ObservationScaler.load(path, expected_schema="obs-v1", fields=("b", "a"))
-    assert json.loads(path.read_text()) == scaler.to_dict()
+        ObservationScaler.load(
+            path, expected_schema="obs-v1", fields=("b", "a"),
+            expected_factor_contract=factor_contract,
+        )
+    with pytest.raises(ValueError, match="factor checkpoint contract mismatch: factor_catalog_hash"):
+        ObservationScaler.load(
+            path,
+            expected_schema="obs-v1",
+            fields=("a", "b"),
+            expected_factor_contract={
+                **factor_contract,
+                "factor_directions": [1, -1],
+                "factor_catalog_hash": "sha256:wrong",
+            },
+        )
+    assert json.loads(path.read_text()) == scaler.to_dict(factor_contract={
+        **factor_contract,
+        "factor_directions": [1, -1],
+    })
+
+
+def test_scaler_load_requires_complete_factor_contract(tmp_path):
+    scaler = ObservationScaler.fit(np.array([[1.0]]), "obs-v1", ("a",))
+    path = tmp_path / "scaler.json"
+    path.write_text(json.dumps({
+        "schema_version": "obs-v1", "fields": ["a"],
+        "mean": [1.0], "scale": [1.0],
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="expected scaler factor contract"):
+        ObservationScaler.load(
+            path, expected_schema="obs-v1", expected_factor_contract=None,
+            fields=("a",),
+        )
 
 
 def test_transform_does_not_update_statistics_and_clips():

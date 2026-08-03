@@ -1,10 +1,18 @@
 import inspect
+import json
 import numpy as np
 import pandas as pd
+import pytest
 from scripts.config import get_config, FACTOR_NAMES, K
 from scripts.env import PortfolioEnv
-from scripts.train import train_ppo, ValidationSharpeCallback
+from scripts.train import (
+    FACTOR_CONTRACT_FIELDS,
+    ValidationSharpeCallback,
+    load_ppo,
+    train_ppo,
+)
 from scripts.state import exogenous_fields
+from scripts.state import STATE_SCHEMA_VERSION
 
 
 def _toy_env():
@@ -33,6 +41,97 @@ def test_train_ppo_backward_compatible():
     # No eval_env, minimal steps, should complete without error
     model = train_ppo(_toy_env(), total_timesteps=64, seed=0, device="cpu")
     assert model is not None
+
+
+def test_train_ppo_saving_writes_contract_bound_metadata(tmp_path):
+    contract = {
+        "factor_catalog_version": "catalog-v1",
+        "factor_catalog_hash": "sha256:catalog",
+        "factor_names": list(FACTOR_NAMES),
+        "factor_directions": [1] * len(FACTOR_NAMES),
+        "selection_run_id": "selection-1",
+        "fold": 1,
+        "schema_version": STATE_SCHEMA_VERSION,
+    }
+    checkpoint = tmp_path / "checkpoint.zip"
+
+    train_ppo(
+        _toy_env(), total_timesteps=64, seed=0, device="cpu",
+        save_path=str(checkpoint), factor_contract=contract,
+    )
+
+    metadata = json.loads((tmp_path / "checkpoint_metadata.json").read_text())
+    assert checkpoint.exists()
+    assert metadata["selected_factors"] == list(FACTOR_NAMES)
+    assert metadata["state_schema_version"] == STATE_SCHEMA_VERSION
+
+
+def test_factor_selected_best_checkpoint_writes_strict_loadable_contract_metadata(tmp_path):
+    contract = {
+        "factor_catalog_version": "catalog-v1",
+        "factor_catalog_hash": "sha256:catalog",
+        "selected_factors": list(FACTOR_NAMES),
+        "factor_directions": [1] * len(FACTOR_NAMES),
+        "selection_run_id": "selection-1",
+        "fold": 1,
+        "state_schema_version": STATE_SCHEMA_VERSION,
+    }
+    checkpoint = tmp_path / "checkpoint.zip"
+    best_checkpoint = tmp_path / "checkpoint_best.zip"
+    best_metadata = tmp_path / "checkpoint_best_metadata.json"
+    env = _toy_env()
+
+    train_ppo(
+        env, total_timesteps=64, seed=0, device="cpu", save_path=str(checkpoint),
+        eval_env=_toy_env(), factor_contract=contract,
+    )
+
+    metadata = json.loads(best_metadata.read_text())
+    assert best_checkpoint.exists()
+    assert {field: metadata[field] for field in FACTOR_CONTRACT_FIELDS} == contract
+    assert load_ppo(
+        str(best_checkpoint), _toy_env(), expected_factor_contract=contract,
+        metadata_path=best_metadata,
+    ) is not None
+
+
+def test_validation_callback_rejects_best_checkpoint_without_complete_contract(tmp_path):
+    with pytest.raises(ValueError, match="best checkpoint factor contract must be an object"):
+        ValidationSharpeCallback(
+            _toy_env(), best_model_path=tmp_path / "best.zip",
+        )
+
+
+def test_train_ppo_rejects_best_checkpoint_with_mismatched_metadata(tmp_path):
+    contract = {
+        "factor_catalog_version": "catalog-v1",
+        "factor_catalog_hash": "sha256:catalog",
+        "selected_factors": list(FACTOR_NAMES),
+        "factor_directions": [1] * len(FACTOR_NAMES),
+        "selection_run_id": "selection-1",
+        "fold": 1,
+        "state_schema_version": STATE_SCHEMA_VERSION,
+    }
+    best_checkpoint = tmp_path / "checkpoint_best.zip"
+    callback = ValidationSharpeCallback(
+        _toy_env(), best_model_path=best_checkpoint, factor_contract=contract,
+    )
+    evaluate = callback._evaluate
+
+    def write_mismatched_metadata():
+        evaluate()
+        metadata_path = tmp_path / "checkpoint_best_metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata["factor_catalog_hash"] = "sha256:mismatch"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    callback._evaluate = write_mismatched_metadata
+
+    with pytest.raises(ValueError, match="factor checkpoint contract mismatch: factor_catalog_hash"):
+        train_ppo(
+            _toy_env(), total_timesteps=64, seed=0, device="cpu",
+            callback=callback,
+        )
 
 
 def test_validation_callback_uses_daily_returns_and_requested_defaults():

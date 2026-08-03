@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from scripts.config import FACTOR_NAMES, K, get_config
-from scripts.env import PortfolioEnv, extract_settle_holding_period
+from scripts.env import PortfolioEnv, effective_range, extract_settle_holding_period
 from scripts.state import exogenous_fields
 
 
@@ -25,6 +25,18 @@ def test_env_rejects_data_without_a_settleable_period():
     features, state = _toy_data(periods=1)
     with pytest.raises(ValueError, match="at least two all_dates"):
         PortfolioEnv(features, state, get_config(), features.trade_date.min(), features.trade_date.max())
+
+
+def test_effective_range_skips_non_finite_market_state_warmup():
+    features, state = _toy_data()
+    state.iloc[:3, 0] = np.nan
+
+    start, end = effective_range(
+        features, state, features.trade_date.min(), features.trade_date.max()
+    )
+
+    assert start == features.trade_date.unique()[3]
+    assert end == features.trade_date.max()
 
 
 def test_weekly_env_exposes_decision_dates_and_compounds_each_settlement_day():

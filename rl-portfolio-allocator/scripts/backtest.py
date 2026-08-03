@@ -39,13 +39,17 @@ def run_backtest(
     train_start, train_end, test_start, test_end,
     timesteps: int = 100_000, seed: int = 0,
     save_path: Optional[str] = None,
+    factor_contract: dict | None = None,
     online_retrain_interval: Optional[int] = None,
 ) -> dict:
     names = tuple(cfg["factor_names"])
     k = len(names)
     train_env = PortfolioEnv(features_df, market_state_df, cfg, train_start, train_end)
     device = select_device(cfg["train_device"])
-    model = train_ppo(train_env, total_timesteps=timesteps, seed=seed, device=device, save_path=save_path)
+    model = train_ppo(
+        train_env, total_timesteps=timesteps, seed=seed, device=device,
+        save_path=save_path, factor_contract=factor_contract,
+    )
 
     test_env = PortfolioEnv(features_df, market_state_df, cfg, test_start, test_end)
     rl_rets, infos, rl_dates = run_ppo_rollout(model, test_env)

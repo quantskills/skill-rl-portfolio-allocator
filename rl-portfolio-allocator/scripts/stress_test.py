@@ -65,6 +65,11 @@ def load_frozen_method(path: str) -> dict:
 
 def apply_frozen_method(cfg: dict, method: dict, default_budget: int) -> tuple[dict, int]:
     """Apply frozen training/evaluation metadata before running stress segments."""
+    from scripts.train import require_factor_contract
+
+    factor_contract = require_factor_contract(
+        method, context="frozen method factor contract"
+    )
     applied = dict(cfg)
     for key in ("reward_variant", "buffer_variant", "schema_version"):
         if key in method:
@@ -73,12 +78,10 @@ def apply_frozen_method(cfg: dict, method: dict, default_budget: int) -> tuple[d
     if buffer_config is None:
         raise ValueError("frozen method artifact must contain buffer_config")
     applied.update(buffer_config)
-    if "factor_names" in method:
-        names = list(method["factor_names"])
-        if not names:
-            raise ValueError("frozen factor_names must be non-empty")
-        applied["factor_names"] = names
-        applied["k"] = len(names)
+    applied["factor_names"] = factor_contract["selected_factors"]
+    applied["factor_directions"] = factor_contract["factor_directions"]
+    applied["k"] = len(factor_contract["selected_factors"])
+    applied["schema_version"] = factor_contract["state_schema_version"]
     budget = int(method.get("training_budget", default_budget))
     if budget <= 0:
         raise ValueError("training_budget must be positive")
@@ -126,7 +129,15 @@ def _core_metrics(features_df: pd.DataFrame, cfg: dict,
 
 
 def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
-                   cfg: dict, timesteps: int = 100_000, method: dict | None = None) -> list:
+                   cfg: dict, timesteps: int = 100_000, method: dict | None = None,
+                   *, seed: int = 0, checkpoint_path: str | None = None,
+                   branch: str | None = None, fold: int | None = None) -> list:
+    """Run real stress training for one frozen walk-forward branch/seed pair.
+
+    ``checkpoint_path`` is persisted as provenance for the frozen test model;
+    stress periods are trained independently and must not load that later
+    checkpoint.
+    """
     if method is not None:
         cfg, timesteps = apply_frozen_method(cfg, method, timesteps)
     out = []
@@ -145,7 +156,7 @@ def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
             features_df=features_df, market_state_df=market_state_df, cfg=cfg,
             train_start=data_start, train_end=seg["train_end"],
             test_start=seg["test_start"], test_end=seg["test_end"],
-            timesteps=timesteps, seed=0,
+            timesteps=timesteps, seed=seed,
         )
         core = _core_metrics(
             features_df, cfg,
@@ -164,6 +175,12 @@ def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
                 "schema_version": cfg.get("schema_version"),
                 "training_budget": timesteps,
             }
+        if checkpoint_path is not None:
+            record["checkpoint_path"] = str(checkpoint_path)
+        if branch is not None:
+            record["branch"] = branch
+        if fold is not None:
+            record["fold"] = fold
         out.append(record)
     return out
 

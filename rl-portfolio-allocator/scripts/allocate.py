@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 import pathlib
 from datetime import datetime, timezone
@@ -15,11 +16,71 @@ from scripts.config import (
     get_config, FACTOR_NAMES, K, STRATEGY_ID, DATA_VERSION
 )
 from scripts.env import PortfolioEnv, effective_range
-from scripts.train import train_ppo, load_ppo, select_device
+from scripts.train import (
+    FACTOR_CONTRACT_FIELDS,
+    _canonical_contract_payload,
+    _normalized_contract_values,
+    load_ppo,
+    require_factor_contract,
+    select_device,
+    train_ppo,
+    validate_factor_contract,
+)
 from scripts.walk_forward import frozen_method_id
 from scripts.validate import run_all
 from scripts.observation import ObservationScaler, collect_training_observations
 from scripts.state import STATE_SCHEMA_VERSION, state_fields
+
+
+def _factor_contract_from_payload(payload: dict | None, *, default_factors=None) -> dict | None:
+    if payload is None:
+        return None
+    source = _canonical_contract_payload(payload)
+    normalized = _normalized_contract_values(source)
+    explicit_fields = {
+        key: normalized[key]
+        for key in FACTOR_CONTRACT_FIELDS
+        if key in normalized and normalized[key] is not None
+    }
+    if not explicit_fields:
+        return None
+    if "selected_factors" in explicit_fields:
+        explicit_fields["selected_factors"] = list(explicit_fields["selected_factors"])
+    elif default_factors is not None:
+        explicit_fields["selected_factors"] = list(default_factors)
+    return explicit_fields
+
+
+def _factor_names_from_payload(payload: dict | None, *, fallback=None) -> list[str]:
+    source = _canonical_contract_payload(payload)
+    if "selected_factors" in source and source["selected_factors"] is not None:
+        return list(source["selected_factors"])
+    if "factor_names" in source and source["factor_names"] is not None:
+        return list(source["factor_names"])
+    if fallback is not None:
+        return list(fallback)
+    return list(FACTOR_NAMES)
+
+
+def _runtime_factor_names(cfg: dict, factor_contract: dict | None = None) -> tuple[str, ...]:
+    """Resolve runtime names once and reject config/contract disagreement."""
+    contract_source = _canonical_contract_payload(factor_contract)
+    contract_names = contract_source.get("selected_factors")
+    config_names = cfg.get("factor_names")
+    if contract_names is not None and config_names is not None:
+        if tuple(contract_names) != tuple(config_names):
+            raise ValueError("factor contract selected_factors disagree with config")
+    names = contract_names if contract_names is not None else config_names
+    return tuple(names or FACTOR_NAMES)
+
+
+def _load_checkpoint_metadata(path, expected_factor_contract: dict | None = None) -> dict:
+    metadata = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    if expected_factor_contract is not None:
+        require_factor_contract(metadata, context="checkpoint metadata")
+    if expected_factor_contract is not None:
+        validate_factor_contract(metadata, expected_factor_contract)
+    return metadata
 
 
 def load_research_approval(path) -> dict:
@@ -33,7 +94,7 @@ def load_research_approval(path) -> dict:
         raise RuntimeError("approval must come from a full walk-forward run")
     required = {
         "schema_version", "method_id", "method_path", "gates_path",
-        "run_mode", "fold_count", "seed_count",
+        "comparison_path", "comparison_id", "run_mode", "fold_count", "seed_count",
     }
     missing = required - set(data)
     if missing:
@@ -41,19 +102,107 @@ def load_research_approval(path) -> dict:
     if (data["run_mode"] != "full" or data["fold_count"] < 3
             or data["seed_count"] < 5):
         raise ValueError("approval missing complete full-run metadata")
-    method_path = approval_path.parent / data["method_path"]
-    gates_path = approval_path.parent / data["gates_path"]
-    if not method_path.exists() or not gates_path.exists():
-        raise FileNotFoundError("approval references missing method or gates")
+    method_path = _approval_reference(approval_path, data["method_path"], "method_path")
+    gates_path = _approval_reference(approval_path, data["gates_path"], "gates_path")
+    comparison_path = _approval_reference(
+        approval_path, data["comparison_path"], "comparison_path"
+    )
+    if not method_path.exists() or not gates_path.exists() or not comparison_path.exists():
+        raise FileNotFoundError("approval references missing method, gates, or comparison")
     method = json.loads(method_path.read_text(encoding="utf-8"))
-    if data["schema_version"] != method.get("schema_version"):
+    method_contract = require_factor_contract(method, context="approved method")
+    method_schema = method.get("schema_version", method_contract["state_schema_version"])
+    if data["schema_version"] != method_schema:
         raise RuntimeError("approval and method schema mismatch")
     if frozen_method_id(method) != data["method_id"]:
         raise RuntimeError("approved method hash mismatch")
     gates = json.loads(gates_path.read_text(encoding="utf-8"))
     if gates.get("research_ok") is not True:
         raise RuntimeError("approved gates did not pass")
+    comparison_id = _file_id(comparison_path)
+    if data["comparison_id"] != comparison_id:
+        raise RuntimeError("approval comparison hash mismatch")
+    if (gates.get("comparison_path") != data["comparison_path"]
+            or gates.get("comparison_id") != comparison_id):
+        raise RuntimeError("approved gates are not bound to the comparison evidence")
+    comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+    from scripts.research_gates import evaluate_candidate_gates
+
+    if evaluate_candidate_gates(comparison).get("research_ok") is not True:
+        raise RuntimeError("comparison evidence did not pass research gates")
+    _validate_persisted_paired_evidence(approval_path.parent, comparison)
     return data
+
+
+def _approval_reference(approval_path: pathlib.Path, value, field: str) -> pathlib.Path:
+    reference = pathlib.Path(value) if isinstance(value, str) else None
+    if reference is None or reference.is_absolute() or ".." in reference.parts:
+        raise ValueError(f"approval {field} must be a relative bundle path")
+    return approval_path.parent / reference
+
+
+def _validate_persisted_paired_evidence(run_root: pathlib.Path, comparison: dict) -> None:
+    evidence = comparison.get("paired_evidence") if isinstance(comparison, dict) else None
+    if not isinstance(evidence, dict):
+        raise ValueError("comparison paired evidence is missing")
+    expected_branches = ("candidate_20f", "control_6f")
+    artifact_paths = set()
+    branch_keys = {}
+    for branch in expected_branches:
+        branch_evidence = evidence.get(branch)
+        rows = branch_evidence.get("rows") if isinstance(branch_evidence, dict) else None
+        if not isinstance(rows, list) or len(rows) != 15:
+            raise ValueError(f"comparison {branch} must contain exactly 15 evidence rows")
+        keys = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("comparison evidence row is invalid")
+            fold, seed = row.get("fold"), row.get("seed")
+            if (row.get("branch") != branch or not isinstance(fold, int)
+                    or isinstance(fold, bool) or not isinstance(seed, int)
+                    or isinstance(seed, bool)):
+                raise ValueError("comparison evidence branch, fold, or seed is invalid")
+            key = (fold, seed)
+            if key in keys:
+                raise ValueError("comparison evidence has duplicate branch/fold/seed rows")
+            keys.add(key)
+            artifact = _approval_reference(
+                run_root / "approval.json", row.get("stress_artifact_path"),
+                "stress_artifact_path",
+            )
+            relative_artifact = str(artifact.relative_to(run_root))
+            if relative_artifact in artifact_paths:
+                raise ValueError("comparison evidence stress artifact paths must be distinct")
+            if not artifact.is_file():
+                raise FileNotFoundError(f"persisted stress artifact missing: {artifact}")
+            artifact_paths.add(relative_artifact)
+            persisted = json.loads(artifact.read_text(encoding="utf-8"))
+            if (persisted.get("branch") != branch or persisted.get("fold") != fold
+                    or persisted.get("seed") != seed):
+                raise RuntimeError("persisted stress artifact branch/fold/seed mismatch")
+            expected_mdd = row.get("stress_mdd")
+            actual_mdd = persisted.get("stress_mdd")
+            try:
+                matches_mdd = math.isfinite(float(expected_mdd)) and math.isfinite(float(actual_mdd)) and math.isclose(
+                    float(expected_mdd), float(actual_mdd), rel_tol=0.0, abs_tol=1e-12
+                )
+            except (TypeError, ValueError):
+                matches_mdd = False
+            if not matches_mdd:
+                raise RuntimeError("persisted stress artifact MDD mismatch")
+            expected_hash = row.get("stress_artifact_sha256")
+            if not isinstance(expected_hash, str) or not expected_hash:
+                raise ValueError("comparison evidence stress artifact hash is missing")
+            if _file_id(artifact) != expected_hash:
+                raise RuntimeError("stress artifact hash mismatch")
+        branch_keys[branch] = keys
+    candidate_keys = branch_keys["candidate_20f"]
+    if candidate_keys != branch_keys["control_6f"]:
+        raise ValueError("comparison evidence branch fold/seed pairs do not match")
+    if len(candidate_keys) != 15 or len({fold for fold, _ in candidate_keys}) != 3 or len({seed for _, seed in candidate_keys}) != 5:
+        raise ValueError("comparison evidence must contain exactly 3 folds x 5 seeds")
+    if len(artifact_paths) != 30:
+        raise ValueError("comparison evidence must contain 30 distinct persisted stress artifacts")
 
 
 def load_approved_method(path) -> tuple[dict, dict]:
@@ -69,18 +218,25 @@ def copy_approval_bundle(approval_path, candidate_dir) -> None:
     source_approval = pathlib.Path(approval_path)
     candidate = pathlib.Path(candidate_dir)
     data = json.loads(source_approval.read_text(encoding="utf-8"))
+    load_research_approval(source_approval)
     candidate.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_approval, candidate / "approval.json")
-    for field in ("method_path", "gates_path"):
+    for field in ("method_path", "gates_path", "comparison_path"):
         reference = pathlib.Path(data[field])
-        if reference.is_absolute() or ".." in reference.parts:
-            raise ValueError(f"approval {field} must be a relative candidate path")
-        source = source_approval.parent / reference
+        source = _approval_reference(source_approval, data[field], field)
         if not source.exists():
             raise FileNotFoundError(f"approval references missing {field}: {source}")
         target = candidate / reference
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+    comparison = json.loads((source_approval.parent / data["comparison_path"]).read_text(encoding="utf-8"))
+    for branch in ("candidate_20f", "control_6f"):
+        for row in comparison["paired_evidence"][branch]["rows"]:
+            reference = pathlib.Path(row["stress_artifact_path"])
+            source = _approval_reference(source_approval, row["stress_artifact_path"], "stress_artifact_path")
+            target = candidate / reference
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
 
 
 def atomic_publish(candidate_dir, production_dir) -> None:
@@ -94,7 +250,7 @@ def atomic_publish(candidate_dir, production_dir) -> None:
     allocations = candidate / "allocations.parquet"
     if not scaler.exists() or not checkpoint.exists() or not allocations.exists():
         raise FileNotFoundError("candidate allocations, scaler, or checkpoint missing")
-    load_research_approval(approval)
+    approval_data, approved_method = load_approved_method(approval)
     if json.loads(scaler.read_text(encoding="utf-8")).get("schema_version") != STATE_SCHEMA_VERSION:
         raise ValueError("candidate scaler schema mismatch")
     if checkpoint.stat().st_size == 0:
@@ -102,15 +258,21 @@ def atomic_publish(candidate_dir, production_dir) -> None:
     metadata = candidate / "checkpoint_metadata.json"
     if not metadata.exists():
         raise FileNotFoundError("candidate checkpoint metadata missing")
-    checkpoint_meta = json.loads(metadata.read_text(encoding="utf-8"))
-    approval_data = json.loads(approval.read_text(encoding="utf-8"))
+    expected_contract = require_factor_contract(
+        approved_method, context="approved method"
+    )
+    expected_factor_names = expected_contract["selected_factors"]
+    checkpoint_meta = _load_checkpoint_metadata(metadata, expected_contract)
     scaler_data = json.loads(scaler.read_text(encoding="utf-8"))
-    expected_fields = tuple(state_fields(FACTOR_NAMES))
+    require_factor_contract(scaler_data, context="candidate scaler")
+    expected_fields = tuple(state_fields(expected_factor_names))
     if (scaler_data.get("schema_version") != STATE_SCHEMA_VERSION
             or tuple(scaler_data.get("fields", ())) != expected_fields
             or len(scaler_data.get("mean", ())) != len(expected_fields)
             or len(scaler_data.get("scale", ())) != len(expected_fields)):
         raise ValueError("candidate scaler schema or fields mismatch")
+    validate_factor_contract(scaler_data, expected_contract)
+    validate_factor_contract(checkpoint_meta, expected_contract)
     if checkpoint_meta.get("schema_version") != approval_data["schema_version"]:
         raise ValueError("candidate checkpoint metadata schema mismatch")
     if checkpoint_meta.get("method_id") != approval_data["method_id"]:
@@ -127,7 +289,8 @@ def atomic_publish(candidate_dir, production_dir) -> None:
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir()
-    publish_files = ("allocations.parquet", "checkpoint.zip", "scaler.json", "approval.json")
+    copy_approval_bundle(approval, staging)
+    publish_files = ("allocations.parquet", "checkpoint.zip", "scaler.json")
     for name in publish_files:
         shutil.copy2(candidate / name, staging / name)
     if metadata.exists():
@@ -156,12 +319,13 @@ def atomic_publish(candidate_dir, production_dir) -> None:
         shutil.rmtree(backup)
 
 
-def fit_production_scaler(env, seed: int) -> ObservationScaler:
+def fit_production_scaler(env, seed: int, factor_names=None) -> ObservationScaler:
+    names = tuple(factor_names or FACTOR_NAMES)
     observations = collect_training_observations(env, seed=seed)
     return ObservationScaler.fit(
         observations,
         STATE_SCHEMA_VERSION,
-        tuple(state_fields(FACTOR_NAMES)),
+        tuple(state_fields(names)),
     )
 
 
@@ -173,11 +337,23 @@ def _file_id(path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def load_production_scaler(path) -> ObservationScaler:
+def load_production_scaler(path, factor_names=None,
+                           factor_contract: dict | None = None) -> ObservationScaler:
+    complete_contract = require_factor_contract(
+        factor_contract, context="production scaler factor contract"
+    )
+    contract_source = _canonical_contract_payload(complete_contract)
+    contract_names = contract_source.get("selected_factors")
+    if (contract_names is not None and factor_names is not None
+            and tuple(contract_names) != tuple(factor_names)):
+        raise ValueError("factor contract selected_factors disagree with scaler fields")
+    names = tuple(contract_names if contract_names is not None
+                  else (factor_names or FACTOR_NAMES))
     return ObservationScaler.load(
         path,
         expected_schema=STATE_SCHEMA_VERSION,
-        expected_fields=tuple(state_fields(FACTOR_NAMES)),
+        expected_fields=tuple(state_fields(names)),
+        expected_factor_contract=complete_contract,
     )
 
 
@@ -185,20 +361,31 @@ def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
                         seed: int, checkpoint_path: str,
                         market_state_df: pd.DataFrame, scaler_path: str | None = None,
                         metadata_path: str | None = None,
+                        factor_contract: dict | None = None,
                         method_id: str | None = None) -> str:
+    contract = require_factor_contract(
+        factor_contract, context="production training factor contract"
+    )
+    factor_names = _runtime_factor_names(cfg, contract)
+    cfg["factor_names"] = list(factor_names)
+    cfg["k"] = len(factor_names)
     dates = pd.to_datetime(features_df["trade_date"])
     start, end = effective_range(
         features_df, market_state_df, dates.min(), dates.max(), cfg=cfg
     )
     print(f"effective range: {start.date()} ~ {end.date()}")
     env = PortfolioEnv(features_df, market_state_df, cfg, start, end)
-    scaler = fit_production_scaler(env, seed=seed)
+    scaler = fit_production_scaler(env, seed=seed, factor_names=factor_names)
     env.observation_scaler = scaler
     scaler_target = pathlib.Path(scaler_path) if scaler_path else pathlib.Path(checkpoint_path).with_name("scaler.json")
-    scaler.save(scaler_target)
+    scaler.save(scaler_target, factor_contract=contract)
     device = select_device(cfg["train_device"])
-    train_ppo(env, total_timesteps=timesteps, seed=seed, device=device, save_path=checkpoint_path)
     metadata_target = pathlib.Path(metadata_path) if metadata_path else pathlib.Path(checkpoint_path).with_name("checkpoint_metadata.json")
+    train_ppo(
+        env, total_timesteps=timesteps, seed=seed, device=device,
+        save_path=checkpoint_path, factor_contract=contract,
+        metadata_path=metadata_target,
+    )
     metadata_target.parent.mkdir(parents=True, exist_ok=True)
     metadata = {
         "schema_version": STATE_SCHEMA_VERSION,
@@ -208,6 +395,7 @@ def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
         "timesteps": timesteps,
         "checkpoint_id": _file_id(checkpoint_path),
         "scaler_id": _file_id(scaler_target),
+        **contract,
     }
     if method_id is not None:
         metadata["method_id"] = method_id
@@ -216,19 +404,40 @@ def retrain_production(features_df: pd.DataFrame, cfg: dict, timesteps: int,
 
 
 def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str,
-                 market_state_df: pd.DataFrame, observation_scaler=None) -> pd.DataFrame:
+                 market_state_df: pd.DataFrame, observation_scaler=None,
+                 factor_contract: dict | None = None,
+                 metadata_path=None) -> pd.DataFrame:
+    runtime_contract = require_factor_contract(
+        factor_contract, context="inference factor contract"
+    )
+    factor_names = _runtime_factor_names(cfg, runtime_contract)
+    from scripts.observation import ObservationScaler
+    expected_fields = tuple(state_fields(factor_names))
+    if not isinstance(observation_scaler, ObservationScaler):
+        raise ValueError("inference requires a validated observation scaler")
+    if (observation_scaler.schema_version != STATE_SCHEMA_VERSION
+            or observation_scaler.fields != expected_fields):
+        raise ValueError("inference observation scaler does not match factor contract")
+    runtime_cfg = dict(cfg)
+    runtime_cfg["factor_names"] = list(factor_names)
+    runtime_cfg["k"] = len(factor_names)
     dates = pd.to_datetime(features_df["trade_date"]).unique()
     dates = sorted(dates)
     ctx_start = dates[max(0, len(dates) - 60)]
     end = dates[-1]
     ctx_start, end = effective_range(
-        features_df, market_state_df, ctx_start, end, cfg=cfg
+        features_df, market_state_df, ctx_start, end, cfg=runtime_cfg
     )
     env = PortfolioEnv(
-        features_df, market_state_df, cfg, ctx_start, end,
+        features_df, market_state_df, runtime_cfg, ctx_start, end,
         observation_scaler=observation_scaler,
     )
-    model = load_ppo(model_path, env)
+    model = load_ppo(
+        model_path,
+        env,
+        expected_factor_contract=runtime_contract,
+        metadata_path=metadata_path,
+    )
 
     obs, _ = env.reset(seed=0)
     last_info = None
@@ -271,7 +480,7 @@ def infer_latest(features_df: pd.DataFrame, cfg: dict, model_path: str,
 
     now = datetime.now(timezone.utc).isoformat()
     rows = []
-    fw_json = json.dumps(dict(zip(FACTOR_NAMES, factor_w.tolist())))
+    fw_json = json.dumps(dict(zip(factor_names, factor_w.tolist())))
     trade_date = pd.Timestamp(end).normalize()
     for i, s in enumerate(last_symbols):
         w = float(weights[i])
@@ -333,6 +542,10 @@ def main() -> None:
     args = p.parse_args()
 
     approved, approved_method = load_approved_method(args.approval)
+    factor_contract = require_factor_contract(
+        approved_method, context="approved method"
+    )
+    approved_factor_names = list(factor_contract["selected_factors"])
 
     candidate = pathlib.Path(args.candidate_dir) if args.candidate_dir else None
     if candidate is None:
@@ -357,6 +570,9 @@ def main() -> None:
         for key in ("reward_variant", "buffer_variant")
         if key in approved_method
     })
+    if "factor_names" in approved_method or "selected_factors" in approved_method:
+        cfg["factor_names"] = list(approved_factor_names)
+        cfg["k"] = len(approved_factor_names)
     if approved_method.get("buffer_config"):
         cfg.update(approved_method["buffer_config"])
     if args.retrain:
@@ -365,6 +581,7 @@ def main() -> None:
             checkpoint_path=str(ckpt), market_state_df=market_state,
             scaler_path=str(scaler_path) if scaler_path else None,
             metadata_path=str(metadata_path) if metadata_path else None,
+            factor_contract=factor_contract,
             method_id=approved["method_id"],
         )
         print(f"candidate checkpoint saved: {ckpt}" if candidate else f"production checkpoint saved: {ckpt}")
@@ -372,10 +589,30 @@ def main() -> None:
         raise SystemExit(f"no production checkpoint at {ckpt}; run --retrain first")
     if candidate is not None and not scaler_path.exists():
         raise SystemExit(f"no candidate scaler at {scaler_path}; candidate is incomplete")
-    scaler = load_production_scaler(scaler_path) if scaler_path and scaler_path.exists() else None
+    if candidate is not None and not metadata_path.exists():
+        raise SystemExit(
+            f"no candidate checkpoint metadata at {metadata_path}; candidate is incomplete"
+        )
+    metadata_contract = None
+    if metadata_path and metadata_path.exists():
+        checkpoint_meta = _load_checkpoint_metadata(metadata_path, factor_contract)
+        metadata_contract = require_factor_contract(
+            checkpoint_meta, context="candidate checkpoint metadata"
+        )
+    scaler = (
+        load_production_scaler(
+            scaler_path,
+            factor_names=approved_factor_names,
+            factor_contract=metadata_contract or factor_contract,
+        )
+        if scaler_path and scaler_path.exists()
+        else None
+    )
     allocations = infer_latest(
         feats, cfg, model_path=str(ckpt), market_state_df=market_state,
         observation_scaler=scaler,
+        factor_contract=metadata_contract or factor_contract,
+        metadata_path=metadata_path,
     )
     save_allocations(allocations, str(out_path))
     print(f"allocations saved: {out_path}  rows={len(allocations)}")

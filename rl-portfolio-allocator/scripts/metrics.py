@@ -56,15 +56,27 @@ def win_rate(rets: np.ndarray) -> float:
     return float((rets > 0).mean())
 
 
+def _daily_returns(rets: np.ndarray) -> np.ndarray:
+    values = np.asarray(rets, dtype=object).reshape(-1)
+    flattened = []
+    for value in values:
+        if np.isscalar(value):
+            flattened.append(value)
+        else:
+            flattened.extend(np.asarray(value, dtype=float).reshape(-1))
+    return np.asarray(flattened, dtype=float)
+
+
 def metrics_pack(rets: np.ndarray, name: str) -> dict:
+    daily_rets = _daily_returns(rets)
     return {
         "name": name,
-        "arr": annualized_return(rets),
-        "vol": annualized_vol(rets),
-        "sharpe": sharpe(rets),
-        "sortino": sortino(rets),
-        "mdd": max_drawdown(rets),
-        "calmar": calmar(rets),
-        "win_rate": win_rate(rets),
-        "cumret": float(np.prod(1.0 + rets) - 1.0),
+        "arr": annualized_return(daily_rets),
+        "vol": annualized_vol(daily_rets),
+        "sharpe": sharpe(daily_rets),
+        "sortino": sortino(daily_rets),
+        "mdd": max_drawdown(daily_rets),
+        "calmar": calmar(daily_rets),
+        "win_rate": win_rate(daily_rets),
+        "cumret": float(np.prod(1.0 + daily_rets) - 1.0),
     }

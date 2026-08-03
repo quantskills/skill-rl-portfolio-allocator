@@ -12,12 +12,71 @@ from scripts.state import STATE_SCHEMA_VERSION, state_fields
 from scripts.validate import validate_weights
 
 
-def _write_approval(root, *, research_ok=True, method=None, gates_ok=True):
-    method = method or {"schema_version": "state-v1", "method": "ppo"}
+def _factor_contract(selected_factors=None):
+    names = list(selected_factors or FACTOR_NAMES)
+    return {
+        "factor_catalog_version": "catalog-v1",
+        "factor_catalog_hash": "sha256:catalog",
+        "selected_factors": names,
+        "factor_directions": [(-1 if index % 2 else 1) for index, _ in enumerate(names)],
+        "selection_run_id": "selection-42",
+        "fold": 3,
+        "state_schema_version": STATE_SCHEMA_VERSION,
+    }
+
+
+def _write_approval(root, *, research_ok=True, method=None, gates_ok=True, evidence=True):
+    method = method or {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "method": "ppo",
+        **_factor_contract(),
+    }
     (root / "method.json").write_text(json.dumps(method), encoding="utf-8")
-    (root / "gates.json").write_text(
-        json.dumps({"research_ok": gates_ok}), encoding="utf-8"
-    )
+    if evidence:
+        candidate_rows = []
+        control_rows = []
+        for branch, rows, sharpe, mdd in (
+            ("candidate_20f", candidate_rows, 0.60, -0.25),
+            ("control_6f", control_rows, 0.40, -0.24),
+        ):
+            for fold in range(1, 4):
+                for seed in range(5):
+                    relative = f"{branch}/stress/fold{fold}/seed{seed}.json"
+                    (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                    (root / relative).write_text(json.dumps({
+                        "branch": branch, "fold": fold, "seed": seed,
+                        "stress_mdd": mdd,
+                    }), encoding="utf-8")
+                    stress_artifact_sha256 = allocate._file_id(root / relative)
+                    rows.append({
+                        "branch": branch, "fold": fold, "seed": seed,
+                        "oos_sharpe": sharpe, "cost_2x_oos_sharpe": 0.12,
+                        "annualized_turnover": 8.0, "stress_mdd": mdd,
+                        "stress_artifact_path": relative,
+                        "stress_artifact_sha256": stress_artifact_sha256,
+                    })
+        comparison = {
+            "candidate_median_oos_sharpe": 0.60,
+            "control_median_oos_sharpe": 0.40,
+            "positive_excess_folds": 3,
+            "candidate_cost_2x_oos_sharpe": 0.12,
+            "candidate_annualized_turnover": 8.0,
+            "candidate_stress_mdd": -0.25,
+            "control_stress_mdd": -0.24,
+            "paired_evidence": {
+                "candidate_20f": {"rows": candidate_rows},
+                "control_6f": {"rows": control_rows},
+            },
+        }
+        comparison_path = root / "comparison.json"
+        comparison_path.write_text(json.dumps(comparison), encoding="utf-8")
+        comparison_id = allocate._file_id(comparison_path)
+    else:
+        comparison_id = None
+    (root / "gates.json").write_text(json.dumps({
+        "research_ok": gates_ok,
+        **({"comparison_path": "comparison.json", "comparison_id": comparison_id} if evidence else {}),
+    }), encoding="utf-8")
     approval = {
         "research_ok": research_ok,
         "run_mode": "full",
@@ -28,6 +87,7 @@ def _write_approval(root, *, research_ok=True, method=None, gates_ok=True):
         .frozen_method_id(method),
         "method_path": "method.json",
         "gates_path": "gates.json",
+        **({"comparison_path": "comparison.json", "comparison_id": comparison_id} if evidence else {}),
     }
     path = root / "approval.json"
     path.write_text(json.dumps(approval), encoding="utf-8")
@@ -70,6 +130,78 @@ def test_load_research_approval_accepts_valid_referenced_artifacts(tmp_path):
     assert approval["method_path"] == "method.json"
 
 
+def test_load_research_approval_rejects_evidence_free_passing_approval(tmp_path):
+    path = _write_approval(tmp_path, evidence=False)
+
+    with pytest.raises((FileNotFoundError, ValueError, RuntimeError), match="comparison|evidence"):
+        load_research_approval(path)
+
+
+def test_load_research_approval_rejects_comparison_swapped_after_gate(tmp_path):
+    path = _write_approval(tmp_path)
+    comparison_path = tmp_path / "comparison.json"
+    comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+    comparison["candidate_median_oos_sharpe"] = 9.99
+    comparison_path.write_text(json.dumps(comparison), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="comparison hash"):
+        load_research_approval(path)
+
+
+def test_load_research_approval_rejects_stress_artifact_mdd_mismatch(tmp_path):
+    path = _write_approval(tmp_path)
+    artifact = tmp_path / "candidate_20f" / "stress" / "fold1" / "seed0.json"
+    persisted = json.loads(artifact.read_text(encoding="utf-8"))
+    persisted["stress_mdd"] = -0.99
+    artifact.write_text(json.dumps(persisted), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="MDD mismatch"):
+        load_research_approval(path)
+
+
+@pytest.mark.parametrize("field", ["segments", "checkpoint_path"])
+def test_load_research_approval_rejects_stress_artifact_content_change_with_same_mdd(
+        tmp_path, field):
+    path = _write_approval(tmp_path)
+    artifact = tmp_path / "candidate_20f" / "stress" / "fold1" / "seed0.json"
+    persisted = json.loads(artifact.read_text(encoding="utf-8"))
+    persisted[field] = ["changed"] if field == "segments" else "changed-checkpoint.zip"
+    artifact.write_text(json.dumps(persisted), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="stress artifact hash mismatch"):
+        load_research_approval(path)
+
+
+def test_load_research_approval_rejects_missing_complete_factor_contract(tmp_path):
+    path = _write_approval(
+        tmp_path,
+        method={"schema_version": STATE_SCHEMA_VERSION, "method": "ppo"},
+    )
+    with pytest.raises(ValueError, match="complete factor contract"):
+        load_research_approval(path)
+
+
+def test_load_research_approval_rejects_missing_factor_directions(tmp_path):
+    method = {"schema_version": STATE_SCHEMA_VERSION, "method": "ppo", **_factor_contract()}
+    method.pop("factor_directions")
+    path = _write_approval(tmp_path, method=method)
+    with pytest.raises(ValueError, match="factor_directions"):
+        load_research_approval(path)
+
+
+def test_load_research_approval_rejects_conflicting_factor_name_alias(tmp_path):
+    method = {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "method": "ppo",
+        **_factor_contract(),
+        "factor_names": list(reversed(FACTOR_NAMES)),
+    }
+    path = _write_approval(tmp_path, method=method)
+
+    with pytest.raises(ValueError, match="selected_factors and factor_names"):
+        load_research_approval(path)
+
+
 def test_validate_weights_requires_stock_plus_cash_identity():
     df = pd.DataFrame([
         {"trade_date": pd.Timestamp("2024-01-01"), "side": "long", "weight": 0.6},
@@ -109,15 +241,22 @@ def test_atomic_publish_accepts_current_dynamic_state_schema(tmp_path, monkeypat
     candidate = tmp_path / "candidate"
     production = tmp_path / "production"
     candidate.mkdir()
-    method = {"schema_version": STATE_SCHEMA_VERSION, "method": "ppo"}
+    selected_factors = list(FACTOR_NAMES[:3])
+    method = {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "method": "ppo",
+        **_factor_contract(selected_factors),
+    }
     _write_approval(candidate, method=method)
-    fields = list(state_fields(FACTOR_NAMES))
+    fields = list(state_fields(selected_factors))
+    contract = _factor_contract(selected_factors)
     scaler = candidate / "scaler.json"
     scaler.write_text(json.dumps({
         "schema_version": STATE_SCHEMA_VERSION,
         "fields": fields,
         "mean": [0.0] * len(fields),
         "scale": [1.0] * len(fields),
+        **contract,
     }), encoding="utf-8")
     checkpoint = candidate / "checkpoint.zip"
     checkpoint.write_bytes(b"checkpoint")
@@ -128,9 +267,47 @@ def test_atomic_publish_accepts_current_dynamic_state_schema(tmp_path, monkeypat
         "method_id": approval["method_id"],
         "checkpoint_id": allocate._file_id(checkpoint),
         "scaler_id": allocate._file_id(scaler),
+        **contract,
     }), encoding="utf-8")
     monkeypatch.setattr(allocate, "run_all", lambda *args, **kwargs: (True, []))
 
     atomic_publish(candidate, production)
 
     assert (production / "checkpoint.zip").read_bytes() == b"checkpoint"
+    assert load_research_approval(production / "approval.json")["method_path"] == "method.json"
+    assert (production / "method.json").exists()
+    assert (production / "gates.json").exists()
+
+
+def test_atomic_publish_rejects_factor_contract_mismatch(tmp_path, monkeypatch):
+    candidate = tmp_path / "candidate"
+    production = tmp_path / "production"
+    candidate.mkdir()
+    method = {"schema_version": STATE_SCHEMA_VERSION, "method": "ppo", **_factor_contract()}
+    _write_approval(candidate, method=method)
+    fields = list(state_fields(FACTOR_NAMES))
+    scaler = candidate / "scaler.json"
+    scaler.write_text(json.dumps({
+        "schema_version": STATE_SCHEMA_VERSION,
+        "fields": fields,
+        "mean": [0.0] * len(fields),
+        "scale": [1.0] * len(fields),
+        **_factor_contract(),
+    }), encoding="utf-8")
+    checkpoint = candidate / "checkpoint.zip"
+    checkpoint.write_bytes(b"checkpoint")
+    (candidate / "allocations.parquet").write_bytes(b"allocations")
+    approval = json.loads((candidate / "approval.json").read_text())
+    mismatched = _factor_contract()
+    mismatched["factor_catalog_hash"] = "sha256:wrong"
+    (candidate / "checkpoint_metadata.json").write_text(json.dumps({
+        "schema_version": STATE_SCHEMA_VERSION,
+        "method_id": approval["method_id"],
+        "checkpoint_id": allocate._file_id(checkpoint),
+        "scaler_id": allocate._file_id(scaler),
+        **mismatched,
+    }), encoding="utf-8")
+    monkeypatch.setattr(allocate, "run_all", lambda *args, **kwargs: (True, []))
+
+    with pytest.raises(ValueError, match="factor checkpoint contract mismatch"):
+        atomic_publish(candidate, production)
