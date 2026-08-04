@@ -1163,3 +1163,76 @@ def test_stress_evidence_all_skipped_returns_none():
     from scripts.walk_forward import _stress_evidence
     results = [{"name": "2008_gfc", "skipped": True, "reason": "x"}]
     assert _stress_evidence(results)[:3] == (None, None, None)
+
+
+def test_full_run_candidate_stress_uses_each_folds_own_inputs(tmp_path, monkeypatch):
+    """Regression: the candidate stress branch must use fold N's own materialized
+    inputs, never the stale ``fold_inputs`` loop variable (last fold's panels)."""
+    fold_one_names = CANDIDATE_FACTOR_NAMES[:20]
+    fold_two_names = CANDIDATE_FACTOR_NAMES[:19] + [FACTOR_CATALOG[20].name]
+    names_by_fold = {1: fold_one_names, 2: fold_two_names}
+
+    def selector(*, panel, fold, cfg):
+        return [{"name": name, "direction": 1} for name in names_by_fold[fold.fold]]
+
+    # Market state carries one distinctive return column per selected factor,
+    # mirroring the real build_market_state output.
+    def fake_build_market_state(features, index_returns, cfg, factor_names):
+        return pd.DataFrame({
+            "trade_date": pd.to_datetime(features["trade_date"]),
+            **{f"{name}_factor_ret_20": 0.0 for name in factor_names},
+        })
+
+    monkeypatch.setattr(walk_forward, "build_market_state", fake_build_market_state)
+
+    stress_calls = []
+
+    def stub_stress_tester(**kwargs):
+        stress_calls.append({
+            "branch": kwargs["branch"], "fold": kwargs["fold"], "seed": kwargs["seed"],
+            "market_state_columns": tuple(kwargs["market_state_df"].columns),
+        })
+        return [{
+            "name": "stub_segment", "skipped": False,
+            "metrics": {
+                "rl": {"mdd": -0.10, "calmar": 0.9},
+                "static_factor_equal": {"mdd": -0.11, "calmar": 0.8},
+            },
+            "diagnostics": {"long_exposure_util": 0.9},
+        }]
+
+    monkeypatch.setattr(walk_forward, "_default_stress_tester", stub_stress_tester)
+
+    def trainer(**kwargs):
+        return _trainer_artifacts(kwargs, val_sharpe=1.0)
+
+    def tester(**kwargs):
+        return {
+            "test_sharpe": 1.0, "oos_sharpe": 1.0 if kwargs["branch"] == "candidate_20f" else 0.8, "oos_arr": 0.2,
+            "oos_mdd": -0.1, "excess_return": 0.2,
+            "strongest_baseline_sharpe": 0.1, "strongest_baseline_mdd": -0.2,
+            "annualized_turnover": 1.0, "cost_2x_oos_sharpe": 0.5,
+            "no_leakage_tests_passed": True, "state_quality_tests_passed": True,
+        }
+
+    all_names = CANDIDATE_FACTOR_NAMES + [FACTOR_CATALOG[20].name]
+    run_walk_forward(
+        folds=default_folds()[:2], output_root=tmp_path, smoke=False,
+        run_id="stress-inputs-regression", trainer=trainer, tester=tester,
+        coverage_checker=lambda: None, cfg=_contract_cfg(all_names),
+        selector=selector, candidate_cache=_CandidateCache(all_names),
+        cache_root=tmp_path / "factor-cache", index_returns=pd.DataFrame(),
+    )
+
+    for fold_no, names in names_by_fold.items():
+        candidate_calls = [
+            call for call in stress_calls
+            if call["branch"] == "candidate_20f" and call["fold"] == fold_no
+        ]
+        assert candidate_calls, f"no candidate stress calls recorded for fold {fold_no}"
+        distinctive = f"{names[-1]}_factor_ret_20"
+        for call in candidate_calls:
+            assert distinctive in call["market_state_columns"], (
+                f"fold {fold_no} candidate stress received a market_state without "
+                f"its own factor column {distinctive}: {call['market_state_columns']}"
+            )

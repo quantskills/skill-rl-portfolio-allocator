@@ -959,7 +959,7 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
         for fold in selected_folds:
             frozen_candidate = f"{selected_rewards[fold.fold]}__{selected_buffers[fold.fold]}"
             branch_inputs = (
-                ("candidate_20f", candidate_test_rows, fold_inputs, fold_runtime_cfgs[fold.fold],
+                ("candidate_20f", candidate_test_rows, prepared_folds[fold.fold], fold_runtime_cfgs[fold.fold],
                  method_by_fold[str(fold.fold)], candidate_root),
                 ("control_6f", control_test_rows, control_folds[fold.fold], control_runtime_cfgs[fold.fold],
                  _frozen_method(
