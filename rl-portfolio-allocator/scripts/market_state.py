@@ -59,7 +59,7 @@ def compute_daily_factor_ic(features: pd.DataFrame, factor_names) -> pd.DataFram
     for factor in names:
         df[f"_{factor}_lag"] = df.groupby("symbol", sort=False)[factor].shift(1)
     dates = sorted(df["trade_date"].dropna().unique())
-    result = pd.DataFrame({"trade_date": dates})
+    ic_cols: dict[str, list | pd.Series] = {"trade_date": dates}
     for factor in names:
         lagged = f"_{factor}_lag"
 
@@ -70,8 +70,8 @@ def compute_daily_factor_ic(features: pd.DataFrame, factor_names) -> pd.DataFram
             return float(sample[lagged].corr(sample["ret_1d"], method="spearman"))
 
         values = df.groupby("trade_date", sort=True)[[lagged, "ret_1d"]].apply(daily_ic)
-        result[f"{factor}_ic"] = result["trade_date"].map(values)
-    return result
+        ic_cols[f"{factor}_ic"] = pd.Series(dates).map(values)
+    return pd.DataFrame(ic_cols)
 
 
 def compute_daily_factor_returns(
@@ -138,6 +138,7 @@ def rolling_mean_factor_corr(
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     df = df.sort_values("trade_date").set_index("trade_date")
     columns = [f"{factor}_factor_ret" for factor in names]
+
     values: list[float] = []
     for end in range(len(df)):
         sample = df[columns].iloc[max(0, end + 1 - window) : end + 1]
@@ -186,21 +187,48 @@ def build_market_state(
     cfg = cfg or get_config()
     names = _factor_names(cfg, factor_names)
     market = _market_features(index_returns)
-    ic = compute_daily_factor_ic(features, names)
+
+    # Build IC-derived columns in a dict and create a single DataFrame to avoid
+    # the fragmentation caused by assigning columns one-by-one in a loop.
+    ic_raw = compute_daily_factor_ic(features, names)
+    ic_cols: dict[str, pd.Series] = {"trade_date": ic_raw["trade_date"]}
     for factor in names:
-        ic[f"{factor}_ic_mean_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=20).mean()
-        ic[f"{factor}_ic_mean_60"] = ic[f"{factor}_ic"].rolling(60, min_periods=60).mean()
-        ic[f"{factor}_icir_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=20).mean() / ic[f"{factor}_ic"].rolling(20, min_periods=20).std()
-        ic[f"{factor}_ic_positive_20"] = ic[f"{factor}_ic"].rolling(20, min_periods=20).apply(lambda x: np.mean(x > 0), raw=True)
-    factor_returns = compute_daily_factor_returns(features, cfg, names)
+        s = ic_raw[f"{factor}_ic"]
+        ic_cols[f"{factor}_ic"] = s
+        ic_cols[f"{factor}_ic_mean_20"] = s.rolling(20, min_periods=20).mean()
+        ic_cols[f"{factor}_ic_mean_60"] = s.rolling(60, min_periods=60).mean()
+        ic_cols[f"{factor}_icir_20"] = (
+            s.rolling(20, min_periods=20).mean()
+            / s.rolling(20, min_periods=20).std()
+        )
+        ic_cols[f"{factor}_ic_positive_20"] = (
+            s.rolling(20, min_periods=20).apply(lambda x: np.mean(x > 0), raw=True)
+        )
+    ic = pd.DataFrame(ic_cols)
+
+    # Same dict-based approach for factor return columns.
+    fr_raw = compute_daily_factor_returns(features, cfg, names)
+    fr_cols: dict[str, pd.Series] = {"trade_date": fr_raw["trade_date"]}
     for factor in names:
         col = f"{factor}_factor_ret"
-        factor_returns[f"{factor}_factor_ret_20"] = factor_returns[col].rolling(20, min_periods=20).mean()
-        factor_returns[f"{factor}_factor_ret_60"] = factor_returns[col].rolling(60, min_periods=60).mean()
-        factor_returns[f"{factor}_factor_vol_20"] = factor_returns[col].rolling(20, min_periods=20).std()
-        factor_returns[f"{factor}_factor_vol_60"] = factor_returns[col].rolling(60, min_periods=60).std()
-    factor_returns["factor_corr_20"] = rolling_mean_factor_corr(factor_returns, 20, names).reindex(pd.to_datetime(factor_returns["trade_date"])).to_numpy()
-    factor_returns["factor_corr_60"] = rolling_mean_factor_corr(factor_returns, 60, names).reindex(pd.to_datetime(factor_returns["trade_date"])).to_numpy()
+        s = fr_raw[col]
+        fr_cols[col] = s
+        fr_cols[f"{factor}_factor_ret_20"] = s.rolling(20, min_periods=20).mean()
+        fr_cols[f"{factor}_factor_ret_60"] = s.rolling(60, min_periods=60).mean()
+        fr_cols[f"{factor}_factor_vol_20"] = s.rolling(20, min_periods=20).std()
+        fr_cols[f"{factor}_factor_vol_60"] = s.rolling(60, min_periods=60).std()
+    fr_cols["factor_corr_20"] = (
+        rolling_mean_factor_corr(fr_raw, 20, names)
+        .reindex(pd.to_datetime(fr_raw["trade_date"]))
+        .to_numpy()
+    )
+    fr_cols["factor_corr_60"] = (
+        rolling_mean_factor_corr(fr_raw, 60, names)
+        .reindex(pd.to_datetime(fr_raw["trade_date"]))
+        .to_numpy()
+    )
+    factor_returns = pd.DataFrame(fr_cols)
+
     state = market.merge(ic, on="trade_date", how="inner").merge(factor_returns, on="trade_date", how="inner")
     state = state.drop(columns=[f"{factor}_factor_ret" for factor in names])
     state = state.sort_values("trade_date").reset_index(drop=True)

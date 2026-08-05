@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 import scripts.allocate as allocate
-from scripts.config import FACTOR_NAMES
+from scripts.config import FACTOR_NAMES, TRAIN_SEEDS
 from scripts.state import STATE_SCHEMA_VERSION, exogenous_fields, state_fields
 
 
@@ -31,7 +31,7 @@ def _write_passing_approval(root, method):
         ("control_6f", control_rows, 0.40, -0.24),
     ):
         for fold in range(1, 4):
-            for seed in range(5):
+            for seed in TRAIN_SEEDS:
                 path = root / branch / "stress" / f"fold{fold}" / f"seed{seed}.json"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(json.dumps({
@@ -80,7 +80,7 @@ def _write_passing_approval(root, method):
         "comparison_id": comparison_id,
     }), encoding="utf-8")
     approval = {
-        "research_ok": True, "run_mode": "full", "fold_count": 3, "seed_count": 5,
+        "research_ok": True, "run_mode": "full", "fold_count": 3, "seed_count": len(TRAIN_SEEDS),
         "schema_version": method["schema_version"],
         "method_id": allocate.frozen_method_id(method), "method_path": "method.json",
         "gates_path": "gates.json", "comparison_path": "comparison.json",
@@ -114,7 +114,7 @@ def test_candidate_approval_bundle_preserves_referenced_paths(tmp_path):
     assert (candidate / "gates.json").exists()
     assert (candidate / "comparison.json").exists()
     assert (candidate / "candidate_20f" / "stress" / "fold1" / "seed0.json").exists()
-    assert (candidate / "control_6f" / "stress" / "fold3" / "seed4.json").exists()
+    assert (candidate / "control_6f" / "stress" / "fold3" / f"seed{TRAIN_SEEDS[-1]}.json").exists()
     assert (candidate / "candidate_20f" / "selection" / "fold3" / "selected_factors.json").exists()
 
 

@@ -1,8 +1,25 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# data & artifacts - generated from private data sources, must not be committed
+rl-portfolio-allocator/data/
+rl-portfolio-allocator/data/*.parquet
+rl-portfolio-allocator/artifacts/
+
+# checkpoints - only keep the directory marker
 rl-portfolio-allocator/checkpoints/*
 !rl-portfolio-allocator/checkpoints/.gitkeep
+
+# production data
 rl-portfolio-allocator-production/data/*.parquet
 rl-portfolio-allocator-production/data/*.csv
+
+# internal dev tooling - not meant for community repos
+.superpowers/
+docs/superpowers/
+rl-portfolio-allocator/.superpowers/
+.cursor/
+
+# environment secrets
 .env

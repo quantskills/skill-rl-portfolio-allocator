@@ -1,6 +1,0 @@
----
-description: Enter skill-rl-portfolio-allocator
-globs:
-alwaysApply: false
----
-Read `SKILL.md` first. For research/training use `rl-portfolio-allocator/SKILL.md`, for read-only queries use `rl-portfolio-allocator-production/SKILL.md`.

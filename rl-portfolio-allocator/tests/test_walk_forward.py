@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from scripts.config import TRAIN_SEEDS
 from scripts.walk_forward import (
     BUFFER_CONFIGS,
     BUFFER_CANDIDATES,
@@ -150,7 +151,7 @@ def _simple_fold_market_state(monkeypatch):
 
 
 def test_constants_are_closed_and_buffer_configs_are_exact():
-    assert SEEDS == (0, 1, 2, 3, 4)
+    assert SEEDS == TRAIN_SEEDS == (0,)
     assert DEFAULT_REWARD_CANDIDATES == ("none", "gentle", "low", "constrained", "legacy_dsr")
     assert reward_candidates() == DEFAULT_REWARD_CANDIDATES
     assert BUFFER_CANDIDATES == ("tight", "default", "wide")
@@ -581,10 +582,10 @@ def test_full_runs_use_unique_run_directories_and_write_frozen_test_records(tmp_
     )
     assert first["run_id"] != second["run_id"]
     assert len(list(tmp_path.iterdir())) == 2
-    assert len([c for c in calls if c[0] == "test"]) == 60
+    assert len([c for c in calls if c[0] == "test"]) == 2 * 3 * len(SEEDS) * 2
     for run_id in (first["run_id"], second["run_id"]):
-        assert len(list((tmp_path / run_id / "candidate_20f" / "test").rglob("*.json"))) == 15
-        assert len(list((tmp_path / run_id / "control_6f" / "test").rglob("*.json"))) == 15
+        assert len(list((tmp_path / run_id / "candidate_20f" / "test").rglob("*.json"))) == len(SEEDS) * 3
+        assert len(list((tmp_path / run_id / "control_6f" / "test").rglob("*.json"))) == len(SEEDS) * 3
 
 
 def test_full_run_accepts_explicit_run_id_and_writes_full_approval(tmp_path, monkeypatch):
@@ -623,7 +624,7 @@ def test_full_run_accepts_explicit_run_id_and_writes_full_approval(tmp_path, mon
     approval = json.loads((tmp_path / "full-run-001" / "approval.json").read_text())
     assert approval["run_mode"] == "full"
     assert approval["fold_count"] == 3
-    assert approval["seed_count"] == 5
+    assert approval["seed_count"] == len(SEEDS)
     assert approval["comparison_path"] == "comparison.json"
     assert approval["comparison_id"] == walk_forward.artifact_id(
         tmp_path / "full-run-001" / "comparison.json"
@@ -741,7 +742,7 @@ def test_full_custom_tester_cannot_publish_without_real_stress_output(tmp_path, 
         cfg=_contract_cfg(), **_factor_inputs(tmp_path),
     )
 
-    assert len(stress_calls) == 30
+    assert len(stress_calls) == len(SEEDS) * 3 * 2
     assert result["gates"]["research_ok"] is False
     assert not (tmp_path / result["run_id"] / "approval.json").exists()
 
@@ -775,7 +776,7 @@ def test_full_stress_evidence_is_seed_specific_and_persisted_per_test_row(tmp_pa
         cfg=_contract_cfg(), **_factor_inputs(tmp_path),
     )
 
-    assert len(stress_calls) == 30
+    assert len(stress_calls) == len(SEEDS) * 3 * 2
     assert {(branch, fold, seed) for branch, fold, seed, _ in stress_calls} == {
         (branch, fold, seed)
         for branch in ("candidate_20f", "control_6f")

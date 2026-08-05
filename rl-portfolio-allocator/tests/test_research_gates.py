@@ -1,5 +1,6 @@
 import pytest
 
+from scripts.config import TRAIN_SEEDS
 from scripts.research_gates import evaluate_candidate_gates, evaluate_research_gates
 from scripts.walk_forward import aggregate_candidate_comparison
 
@@ -55,7 +56,7 @@ def complete_paired_rows():
     candidate_rows = []
     control_rows = []
     for fold in range(1, 4):
-        for seed in range(5):
+        for seed in TRAIN_SEEDS:
             candidate_rows.append({
                 "branch": "candidate_20f", "fold": fold, "seed": seed,
                 "oos_sharpe": 0.60, "cost_2x_oos_sharpe": 0.12,
@@ -78,7 +79,7 @@ def complete_paired_rows():
 def candidate_passing_summary():
     candidate_rows, control_rows = complete_paired_rows()
     return aggregate_candidate_comparison(
-        candidate_rows, control_rows, fold_count=3, seed_count=5,
+        candidate_rows, control_rows, fold_count=3, seed_count=len(TRAIN_SEEDS),
     )
 
 
@@ -123,19 +124,19 @@ def test_candidate_gates_reject_fourteen_of_fifteen_paired_rows():
     candidate_rows.pop()
 
     summary = aggregate_candidate_comparison(
-        candidate_rows, control_rows, fold_count=3, seed_count=5,
+        candidate_rows, control_rows, fold_count=3, seed_count=len(TRAIN_SEEDS),
     )
     result = evaluate_candidate_gates(summary)
 
     assert result["research_ok"] is False
-    assert any("candidate_20f has 14 rows; expected 15" in reason for reason in result["failure_reasons"])
+    assert any(f"candidate_20f has {len(TRAIN_SEEDS) * 3 - 1} rows; expected {len(TRAIN_SEEDS) * 3}" in reason for reason in result["failure_reasons"])
 
 
 def test_candidate_gates_reject_missing_required_pair_metric():
     candidate_rows, control_rows = complete_paired_rows()
     candidate_rows[0].pop("cost_2x_oos_sharpe")
     summary = aggregate_candidate_comparison(
-        candidate_rows, control_rows, fold_count=3, seed_count=5,
+        candidate_rows, control_rows, fold_count=3, seed_count=len(TRAIN_SEEDS),
     )
 
     result = evaluate_candidate_gates(summary)
@@ -150,7 +151,7 @@ def test_candidate_gates_reject_rows_without_distinct_persisted_stress_evidence(
         row["stress_artifact_path"] = "stress/shared.json"
 
     summary = aggregate_candidate_comparison(
-        candidate_rows, control_rows, fold_count=3, seed_count=5,
+        candidate_rows, control_rows, fold_count=3, seed_count=len(TRAIN_SEEDS),
     )
     result = evaluate_candidate_gates(summary)
 
@@ -164,7 +165,7 @@ def _paired_summary(candidate_overrides=None, control_overrides=None):
         row.update(candidate_overrides or {})
     for row in control_rows:
         row.update(control_overrides or {})
-    return aggregate_candidate_comparison(candidate_rows, control_rows, fold_count=3, seed_count=5)
+    return aggregate_candidate_comparison(candidate_rows, control_rows, fold_count=3, seed_count=len(TRAIN_SEEDS))
 
 
 def _gate_by_name(result, name):
@@ -192,7 +193,7 @@ def test_new_stress_metrics_are_required_evidence():
     candidate_rows, control_rows = complete_paired_rows()
     for row in candidate_rows:
         del row["stress_calmar_excess"]
-    summary = aggregate_candidate_comparison(candidate_rows, control_rows, fold_count=3, seed_count=5)
+    summary = aggregate_candidate_comparison(candidate_rows, control_rows, fold_count=3, seed_count=len(TRAIN_SEEDS))
     result = evaluate_candidate_gates(summary)
     assert result["research_ok"] is False
     assert any("stress_calmar_excess" in reason for reason in result["failure_reasons"])

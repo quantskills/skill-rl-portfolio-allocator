@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Callable, Any
 
+from scripts.config import TRAIN_SEEDS
+
 
 def _gate(name: str, actual: Any, threshold: Any, predicate: Callable[[Any, Any], bool]) -> dict:
     passed = actual is not None and threshold is not None and bool(predicate(actual, threshold))
@@ -164,8 +166,9 @@ def _paired_evidence_failures(evidence: Any) -> list[str]:
         if not isinstance(rows, list):
             failures.append(f"{branch} rows are missing")
             continue
-        if len(rows) != 15:
-            failures.append(f"{branch} has {len(rows)} rows; expected 15")
+        expected_rows = 3 * len(TRAIN_SEEDS)
+        if len(rows) != expected_rows:
+            failures.append(f"{branch} has {len(rows)} rows; expected {expected_rows}")
 
         keys = []
         stress_artifacts = []
@@ -218,8 +221,8 @@ def _paired_evidence_failures(evidence: Any) -> list[str]:
         failures.append("candidate_20f and control_6f fold/seed pairs do not match")
     if len({fold for fold, _ in candidate_keys}) != 3:
         failures.append("paired evidence does not contain exactly 3 folds")
-    if len({seed for _, seed in candidate_keys}) != 5:
-        failures.append("paired evidence does not contain exactly 5 seeds")
-    if len(candidate_keys) != 15:
-        failures.append("paired evidence does not contain all 3 folds x 5 seeds")
+    if len({seed for _, seed in candidate_keys}) != len(TRAIN_SEEDS):
+        failures.append(f"paired evidence does not contain exactly {len(TRAIN_SEEDS)} seed(s)")
+    if len(candidate_keys) != 3 * len(TRAIN_SEEDS):
+        failures.append(f"paired evidence does not contain all 3 folds x {len(TRAIN_SEEDS)} seed(s)")
     return failures

@@ -94,6 +94,7 @@ def _has_enough(
     train_end: str,
     min_years: int,
     factor_names=None,
+    test_end: str | None = None,
 ) -> tuple[bool, str, str]:
     d = pd.to_datetime(feats["trade_date"])
     state_dates = usable_market_state_dates(market_state, factor_names)
@@ -101,12 +102,17 @@ def _has_enough(
     if len(common) == 0:
         return False, "n/a", "no feature/market_state date intersection"
     data_start = common.min()
+    data_end = common.max()
     train_end_ts = pd.Timestamp(train_end)
     if data_start >= train_end_ts:
         return False, str(data_start.date()), f"data_start {data_start.date()} >= train_end {train_end}"
     years = (train_end_ts - data_start).days / 365.25
     if years < min_years:
         return False, str(data_start.date()), f"only {years:.1f} years before {train_end}, need {min_years}"
+    if test_end is not None:
+        test_end_ts = pd.Timestamp(test_end)
+        if data_end < test_end_ts:
+            return False, str(data_start.date()), f"data_end {data_end.date()} < test_end {test_end}"
     return True, str(data_start.date()), ""
 
 
@@ -148,6 +154,7 @@ def run_all_stress(features_df: pd.DataFrame, market_state_df: pd.DataFrame,
             seg["train_end"],
             seg["required_min_years"],
             factor_names=cfg["factor_names"],
+            test_end=seg.get("test_end"),
         )
         if not ok:
             out.append({"name": seg["name"], "skipped": True, "reason": reason})

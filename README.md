@@ -4,7 +4,7 @@ PPO 学 K 维因子权重 → CSI300 多空组合。研究系统使用严格因�
 
 - 研究/训练:见 `rl-portfolio-allocator/SKILL.md`
 - 只读生产查询:见 `rl-portfolio-allocator-production/SKILL.md`
-- 设计文档:`docs/superpowers/specs/2026-07-22-rl-portfolio-allocator-design.md`
+- 研究运行手册:见 `docs/runbooks/rl-oos-research.md`
 
 ## 快速开始
 

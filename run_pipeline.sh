@@ -9,8 +9,24 @@ WORK_DIR="${PROJECT_DIR}/rl-portfolio-allocator"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 export PYTHONPATH="${WORK_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
+# --- 奖励/因子设计调参 (2026-08-03) ---------------------------------------
+# smoke 压力测试显示验证集选出的 medium 奖励(dd_coeff=1.0)在 2020_covid 出现
+# long_exposure_util < 0.5 的退化(危机期躺平),且 fold3 因子选择完全松弛到
+# correlation_ceiling=1.0(选出的 20 因子高度共线,几乎全是动量/反转族)。
+# 默认把验证候选收窄到更温和的奖励组合(none/low/gentle,gentle 为新增的
+# dd_coeff=0.10/conc=0.20/to=0.05 变体)。所有变量都可在命令行覆盖,例如:
+#   RLPA_REWARD_CANDIDATES=none,low,medium,legacy_dsr bash run_pipeline.sh --all   # 恢复原始候选
+#   RLPA_SELECTION_TARGET_COUNT=12 bash run_pipeline.sh --all                      # 减少因子数,降低共线
+#   RLPA_LAMBDA_DRAWDOWN=0.2 bash run_pipeline.sh --all                            # legacy_dsr 路径的 λ_drawdown
+export RLPA_REWARD_CANDIDATES="${RLPA_REWARD_CANDIDATES:-none,low,gentle}"
+
 log() { printf '[rlpa] %s\n' "$*"; }
 die() { printf '[rlpa] ERROR: %s\n' "$*" >&2; exit 1; }
+
+log_tuning() {
+    log "reward candidates: ${RLPA_REWARD_CANDIDATES}"
+    log "selection target : ${RLPA_SELECTION_TARGET_COUNT:-20}  lambda_drawdown: ${RLPA_LAMBDA_DRAWDOWN:-0.5}"
+}
 
 require_credentials() {
     [[ -n "${PANDA_DATA_USERNAME:-}" && -n "${PANDA_DATA_PASSWORD:-}" ]] || \
@@ -53,14 +69,15 @@ run_raw_data_and_factor_cache() {
 
 run_walk_forward() {
     local mode="$1"
+    shift
     local marker
     marker="$(mktemp)"
     if [[ "$mode" == "--full" && -n "${RLPA_RUN_ID:-}" ]]; then
         (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.walk_forward "$mode" \
-            --output-root artifacts/walk_forward --run-id "$RLPA_RUN_ID")
+            --output-root artifacts/walk_forward --run-id "$RLPA_RUN_ID" "$@")
     else
         (cd "$WORK_DIR" && "$PYTHON_BIN" -m scripts.walk_forward "$mode" \
-            --output-root artifacts/walk_forward)
+            --output-root artifacts/walk_forward "$@")
     fi
     LAST_RUN_ROOT="$(find "$WORK_DIR/artifacts/walk_forward" -mindepth 2 -maxdepth 2 \
         -type f -name gates.json -newer "$marker" -print -exec dirname {} \; | tail -n 1)"
@@ -146,6 +163,7 @@ PY
 run_research() {
     local mode="$1"
     local wf_mode="$2"
+    log_tuning
     run_raw_data_and_factor_cache
     run_coverage
     run_tests
@@ -163,7 +181,7 @@ run_research() {
 
 usage() {
     cat <<'EOF'
-Usage: ./run_pipeline.sh [--all | --research-smoke | --research-full | --publish --approval PATH]
+Usage: ./run_pipeline.sh [--all | --research-smoke | --research-full | --research-single | --publish --approval PATH]
 
 Research (fail-closed):
   --all             Alias for --research-smoke; never publishes production files.
@@ -173,6 +191,9 @@ Research (fail-closed):
                     unless RLPA_REFRESH_DATA=1 is set.
   --research-full   Same sequence with all configured folds and seeds; only a
                     passing full run may write an approval record.
+  --research-single Full walk-forward + stress without reward/buffer ablation.
+                    Uses frozen method low:default, 50k training steps, 3 folds
+                    x 5 seeds. Requires RLPA_RUN_ID for repeatable artifact dirs.
 
 Production (explicit approval required):
   --publish --approval PATH
@@ -180,6 +201,12 @@ Production (explicit approval required):
                     must be emitted by a passing full walk-forward run.
 
   --help            Show this help without credentials or data access.
+
+Tuning knobs (environment variables, see header of this script):
+  RLPA_REWARD_CANDIDATES    逗号分隔的奖励候选集,默认 none,low,gentle
+  RLPA_SELECTION_TARGET_COUNT  候选因子数量,默认 20
+  RLPA_LAMBDA_DRAWDOWN      legacy_dsr 路径的回撤惩罚,默认 0.5
+  RLPA_LAMBDA_TURNOVER / RLPA_LAMBDA_CONCENTRATION  同上,默认 0.05 / 0.5
 EOF
 }
 
@@ -194,6 +221,17 @@ main() {
         --research-full)
             [[ $# -eq 1 ]] || die '--research-full does not accept extra arguments'
             run_research full --full
+            ;;
+        --research-single)
+            [[ $# -eq 1 ]] || die '--research-single does not accept extra arguments'
+            log "single-method walk-forward: reward=low buffer=default timesteps=10000 seed=1"
+            log_tuning
+            run_raw_data_and_factor_cache
+            run_coverage
+            run_tests
+            run_walk_forward --full --frozen-method low:default --timesteps 10000
+            run_research_gates "${LAST_RUN_ROOT#"$WORK_DIR/"}" true || true
+            run_stress "$LAST_RUN_ROOT" 10000
             ;;
         --publish)
             [[ $# -eq 3 && "$2" == "--approval" ]] || die 'usage: --publish --approval APPROVAL_JSON'

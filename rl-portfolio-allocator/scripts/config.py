@@ -13,6 +13,8 @@ CONTROL_FACTOR_NAMES: list[str] = [
 FACTOR_NAMES = CONTROL_FACTOR_NAMES  # compatibility during migration
 K: int = len(CONTROL_FACTOR_NAMES)
 
+TRAIN_SEEDS: tuple[int, ...] = (0,)
+
 TOP_N: int = 30
 BOTTOM_M: int = 15
 LONG_NOTIONAL: float = 1.0

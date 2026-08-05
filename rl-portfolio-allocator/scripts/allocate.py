@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from scripts.config import (
-    get_config, FACTOR_NAMES, K, STRATEGY_ID, DATA_VERSION
+    get_config, FACTOR_NAMES, K, STRATEGY_ID, DATA_VERSION, TRAIN_SEEDS
 )
 from scripts.env import PortfolioEnv, effective_range
 from scripts.train import (
@@ -101,7 +101,7 @@ def load_research_approval(path) -> dict:
     if missing:
         raise ValueError(f"approval missing fields: {sorted(missing)}")
     if (data["run_mode"] != "full" or data["fold_count"] < 3
-            or data["seed_count"] < 5):
+            or data["seed_count"] < len(TRAIN_SEEDS)):
         raise ValueError("approval missing complete full-run metadata")
     method_path = _approval_reference(approval_path, data["method_path"], "method_path")
     gates_path = _approval_reference(approval_path, data["gates_path"], "gates_path")
@@ -182,8 +182,9 @@ def _validate_persisted_paired_evidence(run_root: pathlib.Path, comparison: dict
     for branch in expected_branches:
         branch_evidence = evidence.get(branch)
         rows = branch_evidence.get("rows") if isinstance(branch_evidence, dict) else None
-        if not isinstance(rows, list) or len(rows) != 15:
-            raise ValueError(f"comparison {branch} must contain exactly 15 evidence rows")
+        expected_rows = 3 * len(TRAIN_SEEDS)
+        if not isinstance(rows, list) or len(rows) != expected_rows:
+            raise ValueError(f"comparison {branch} must contain exactly {expected_rows} evidence rows")
         keys = set()
         for row in rows:
             if not isinstance(row, dict):
@@ -230,10 +231,13 @@ def _validate_persisted_paired_evidence(run_root: pathlib.Path, comparison: dict
     candidate_keys = branch_keys["candidate_20f"]
     if candidate_keys != branch_keys["control_6f"]:
         raise ValueError("comparison evidence branch fold/seed pairs do not match")
-    if len(candidate_keys) != 15 or len({fold for fold, _ in candidate_keys}) != 3 or len({seed for _, seed in candidate_keys}) != 5:
-        raise ValueError("comparison evidence must contain exactly 3 folds x 5 seeds")
-    if len(artifact_paths) != 30:
-        raise ValueError("comparison evidence must contain 30 distinct persisted stress artifacts")
+    expected_pairs = 3 * len(TRAIN_SEEDS)
+    if (len(candidate_keys) != expected_pairs
+            or len({fold for fold, _ in candidate_keys}) != 3
+            or len({seed for _, seed in candidate_keys}) != len(TRAIN_SEEDS)):
+        raise ValueError(f"comparison evidence must contain exactly 3 folds x {len(TRAIN_SEEDS)} seed(s)")
+    if len(artifact_paths) != expected_pairs * 2:
+        raise ValueError(f"comparison evidence must contain {expected_pairs * 2} distinct persisted stress artifacts")
 
 
 def load_approved_method(path) -> tuple[dict, dict]:

@@ -22,7 +22,7 @@ if __package__ in (None, ""):
 
 from scripts.check_data_coverage import Fold, check_folds, default_folds
 from scripts.factor_catalog import CATALOG_VERSION, FACTOR_CATALOG, catalog_hash
-from scripts.config import CONTROL_FACTOR_NAMES
+from scripts.config import CONTROL_FACTOR_NAMES, TRAIN_SEEDS
 from scripts.research_gates import evaluate_candidate_gates, evaluate_research_gates
 from scripts.state import STATE_SCHEMA_VERSION, state_fields
 from scripts.market_state import build_market_state
@@ -176,7 +176,7 @@ def write_approval(run_root: pathlib.Path, method: dict, gate_report: dict,
     return path
 
 
-SEEDS = (0, 1, 2, 3, 4)
+SEEDS = TRAIN_SEEDS
 DEFAULT_REWARD_CANDIDATES = ("none", "gentle", "low", "constrained", "legacy_dsr")
 
 
@@ -678,7 +678,7 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
                      coverage_checker=None, features_df=None, index_df=None,
                      cfg=None, timesteps=None, run_id=None, selector=None,
                      candidate_cache=None, cache_root=None, index_returns=None,
-                     stress_tester=None) -> dict:
+                     stress_tester=None, frozen_method=None) -> dict:
     """Run validation-only candidate selection followed by one frozen test per seed."""
     cfg = dict(cfg or {})
     forbidden_dependencies = {"selector", "candidate_cache"} & set(cfg)
@@ -798,20 +798,42 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
         result["factor_contract"] = actual
         return result
 
-    # Phase 1: default rank buffer, reward ablation. Tests are impossible here.
-    for fold in selected_folds:
-        fold_inputs = prepared_folds[fold.fold]
-        factor_bundle = fold_inputs.factor_bundle
-        fold_cfg = fold_runtime_cfgs[fold.fold]
-        for reward in reward_candidates():
+    if frozen_method:
+        parts = [part.strip() for part in str(frozen_method).split(":")]
+        if len(parts) != 2:
+            raise ValueError("frozen-method must be reward:buffer (e.g., low:default)")
+        frozen_reward, frozen_buffer = parts
+        allowed_rewards = tuple(reward_candidates())
+        if frozen_reward not in allowed_rewards:
+            raise ValueError(
+                f"unknown reward '{frozen_reward}'. Allowed: {', '.join(allowed_rewards)}"
+            )
+        if frozen_buffer not in BUFFER_CANDIDATES:
+            raise ValueError(
+                f"unknown buffer '{frozen_buffer}'. Allowed: {', '.join(BUFFER_CANDIDATES)}"
+            )
+        # Assign the frozen method for every fold — no ablation needed.
+        buffer_rows = []
+        buffer_results = {}
+        selected_buffers = {}
+        for fold in selected_folds:
+            selected_rewards[fold.fold] = frozen_reward
+            selected_buffers[fold.fold] = frozen_buffer
+        # Train candidate_20f once per fold+seed with the frozen reward+buffer.
+        for fold in selected_folds:
+            fold_inputs = prepared_folds[fold.fold]
+            factor_bundle = fold_inputs.factor_bundle
+            fold_cfg = fold_runtime_cfgs[fold.fold]
             for seed in selected_seeds:
                 fold_features, fold_state = _fold_input_copies(fold_inputs)
                 result = _invoke_trainer(
-                    trainer, stage="reward_ablation", fold=fold.fold, seed=seed,
-                    candidate=reward, reward_variant=reward, buffer_variant="default",
-                    buffer_config=BUFFER_CONFIGS["default"], train_range=fold.train,
-                    val_range=fold.val, test_range=fold.test, timesteps=timesteps or (128 if smoke else 100_000),
-                    cfg=fold_cfg, artifact_dir=validation_root / f"fold{fold.fold}" / reward / f"seed{seed}",
+                    trainer, stage="frozen_candidate", fold=fold.fold, seed=seed,
+                    candidate=frozen_buffer, reward_variant=frozen_reward,
+                    buffer_variant=frozen_buffer, buffer_config=BUFFER_CONFIGS[frozen_buffer],
+                    train_range=fold.train, val_range=fold.val, test_range=fold.test,
+                    timesteps=timesteps or (128 if smoke else 100_000),
+                    cfg=fold_cfg,
+                    artifact_dir=validation_root / f"fold{fold.fold}" / frozen_buffer / f"seed{seed}",
                     features_df=fold_features, market_state_df=fold_state,
                     factor_contract=fold_contracts[fold.fold],
                     factor_bundle=factor_bundle,
@@ -819,50 +841,78 @@ def run_walk_forward(*, folds=None, output_root, smoke=False, trainer=None, test
                     run_id=run_id,
                 )
                 result = bind_result_contract(result, fold_contracts[fold.fold])
-                row = {"fold": fold.fold, "seed": seed, "candidate": reward,
-                       "val_sharpe": float(result["val_sharpe"]), "stage": "reward_ablation",
-                       "trainer_result": _jsonable(result)}
-                reward_results[(fold.fold, seed, reward)] = result
+                buffer_results[(fold.fold, seed, frozen_buffer)] = result
+                row = {"fold": fold.fold, "seed": seed, "candidate": frozen_buffer,
+                       "val_sharpe": float(result["val_sharpe"]), "stage": "frozen_candidate",
+                       "reward_variant": frozen_reward, "trainer_result": _jsonable(result)}
                 validation_rows.append(row)
-                _write(validation_root / f"fold{fold.fold}" / "reward" / f"{reward}_seed{seed}.json", row)
-        selected_rewards[fold.fold] = select_candidate_on_validation(
-            [row for row in validation_rows if row["fold"] == fold.fold]
-        )
+                _write(validation_root / f"fold{fold.fold}" / "buffer" / f"{frozen_buffer}_seed{seed}.json", row)
+    else:
+        # Phase 1: default rank buffer, reward ablation. Tests are impossible here.
+        for fold in selected_folds:
+            fold_inputs = prepared_folds[fold.fold]
+            factor_bundle = fold_inputs.factor_bundle
+            fold_cfg = fold_runtime_cfgs[fold.fold]
+            for reward in reward_candidates():
+                for seed in selected_seeds:
+                    fold_features, fold_state = _fold_input_copies(fold_inputs)
+                    result = _invoke_trainer(
+                        trainer, stage="reward_ablation", fold=fold.fold, seed=seed,
+                        candidate=reward, reward_variant=reward, buffer_variant="default",
+                        buffer_config=BUFFER_CONFIGS["default"], train_range=fold.train,
+                        val_range=fold.val, test_range=fold.test, timesteps=timesteps or (128 if smoke else 100_000),
+                        cfg=fold_cfg, artifact_dir=validation_root / f"fold{fold.fold}" / reward / f"seed{seed}",
+                        features_df=fold_features, market_state_df=fold_state,
+                        factor_contract=fold_contracts[fold.fold],
+                        factor_bundle=factor_bundle,
+                        branch="candidate_20f",
+                        run_id=run_id,
+                    )
+                    result = bind_result_contract(result, fold_contracts[fold.fold])
+                    row = {"fold": fold.fold, "seed": seed, "candidate": reward,
+                           "val_sharpe": float(result["val_sharpe"]), "stage": "reward_ablation",
+                           "trainer_result": _jsonable(result)}
+                    reward_results[(fold.fold, seed, reward)] = result
+                    validation_rows.append(row)
+                    _write(validation_root / f"fold{fold.fold}" / "reward" / f"{reward}_seed{seed}.json", row)
+            selected_rewards[fold.fold] = select_candidate_on_validation(
+                [row for row in validation_rows if row["fold"] == fold.fold]
+            )
 
-    # Phase 2: buffer ablation with the reward choice frozen by validation only.
-    buffer_rows = []
-    buffer_results = {}
-    selected_buffers = {}
-    for fold in selected_folds:
-        fold_inputs = prepared_folds[fold.fold]
-        factor_bundle = fold_inputs.factor_bundle
-        fold_cfg = fold_runtime_cfgs[fold.fold]
-        selected_reward = selected_rewards[fold.fold]
-        for buffer in BUFFER_CANDIDATES:
-            for seed in selected_seeds:
-                fold_features, fold_state = _fold_input_copies(fold_inputs)
-                result = _invoke_trainer(
-                    trainer, stage="buffer_ablation", fold=fold.fold, seed=seed,
-                    candidate=buffer, reward_variant=selected_reward, buffer_variant=buffer,
-                    buffer_config=BUFFER_CONFIGS[buffer], train_range=fold.train,
-                    val_range=fold.val, test_range=fold.test, timesteps=timesteps or (128 if smoke else 100_000),
-                    cfg=fold_cfg, artifact_dir=validation_root / f"fold{fold.fold}" / buffer / f"seed{seed}",
-                    features_df=fold_features, market_state_df=fold_state,
-                    factor_contract=fold_contracts[fold.fold],
-                    factor_bundle=factor_bundle,
-                    branch="candidate_20f",
-                    run_id=run_id,
-                )
-                result = bind_result_contract(result, fold_contracts[fold.fold])
-                row = {"fold": fold.fold, "seed": seed, "candidate": buffer,
-                       "val_sharpe": float(result["val_sharpe"]), "stage": "buffer_ablation",
-                       "reward_variant": selected_reward, "trainer_result": _jsonable(result)}
-                buffer_results[(fold.fold, seed, buffer)] = result
-                buffer_rows.append(row)
-                _write(validation_root / f"fold{fold.fold}" / "buffer" / f"{buffer}_seed{seed}.json", row)
-        selected_buffers[fold.fold] = select_candidate_on_validation(
-            [row for row in buffer_rows if row["fold"] == fold.fold]
-        )
+        # Phase 2: buffer ablation with the reward choice frozen by validation only.
+        buffer_rows = []
+        buffer_results = {}
+        selected_buffers = {}
+        for fold in selected_folds:
+            fold_inputs = prepared_folds[fold.fold]
+            factor_bundle = fold_inputs.factor_bundle
+            fold_cfg = fold_runtime_cfgs[fold.fold]
+            selected_reward = selected_rewards[fold.fold]
+            for buffer in BUFFER_CANDIDATES:
+                for seed in selected_seeds:
+                    fold_features, fold_state = _fold_input_copies(fold_inputs)
+                    result = _invoke_trainer(
+                        trainer, stage="buffer_ablation", fold=fold.fold, seed=seed,
+                        candidate=buffer, reward_variant=selected_reward, buffer_variant=buffer,
+                        buffer_config=BUFFER_CONFIGS[buffer], train_range=fold.train,
+                        val_range=fold.val, test_range=fold.test, timesteps=timesteps or (128 if smoke else 100_000),
+                        cfg=fold_cfg, artifact_dir=validation_root / f"fold{fold.fold}" / buffer / f"seed{seed}",
+                        features_df=fold_features, market_state_df=fold_state,
+                        factor_contract=fold_contracts[fold.fold],
+                        factor_bundle=factor_bundle,
+                        branch="candidate_20f",
+                        run_id=run_id,
+                    )
+                    result = bind_result_contract(result, fold_contracts[fold.fold])
+                    row = {"fold": fold.fold, "seed": seed, "candidate": buffer,
+                           "val_sharpe": float(result["val_sharpe"]), "stage": "buffer_ablation",
+                           "reward_variant": selected_reward, "trainer_result": _jsonable(result)}
+                    buffer_results[(fold.fold, seed, buffer)] = result
+                    buffer_rows.append(row)
+                    _write(validation_root / f"fold{fold.fold}" / "buffer" / f"{buffer}_seed{seed}.json", row)
+            selected_buffers[fold.fold] = select_candidate_on_validation(
+                [row for row in buffer_rows if row["fold"] == fold.fold]
+            )
 
     # Phase 3: freeze the method, then evaluate each seed exactly once on test.
     candidate_test_rows = []
@@ -1162,6 +1212,9 @@ def main() -> int:
     parser.add_argument("--run-id", default=None,
                         help="explicit full-run directory name for pipeline integration")
     parser.add_argument("--timesteps", type=int, default=None)
+    parser.add_argument("--frozen-method", default=None,
+                        help="skip reward/buffer ablation, use frozen reward:buffer "
+                             "(e.g. low:default)")
     args = parser.parse_args()
     if args.smoke and args.full:
         parser.error("choose only one of --smoke or --full")
@@ -1181,9 +1234,9 @@ def main() -> int:
         folds=default_folds(), output_root=root / args.output_root,
         smoke=args.smoke, trainer=_default_trainer, tester=_default_tester,
         features_df=features, index_df=index_returns, cfg=get_config(),
-        timesteps=args.timesteps or (128 if args.smoke else 100_000),
+        timesteps=args.timesteps or (128 if args.smoke else 10_000),
         run_id=args.run_id, cache_root=factor_cache_root,
-        index_returns=index_returns,
+        index_returns=index_returns, frozen_method=args.frozen_method,
     )
     return 0
 

@@ -7,7 +7,7 @@ import pytest
 
 import scripts.allocate as allocate
 from scripts.allocate import atomic_publish, load_research_approval
-from scripts.config import FACTOR_NAMES
+from scripts.config import FACTOR_NAMES, TRAIN_SEEDS
 from scripts.state import STATE_SCHEMA_VERSION, state_fields
 from scripts.validate import validate_weights
 
@@ -58,7 +58,7 @@ def _write_approval(root, *, research_ok=True, method=None, gates_ok=True, evide
             ("control_6f", control_rows, 0.40, -0.24),
         ):
             for fold in range(1, 4):
-                for seed in range(5):
+                for seed in TRAIN_SEEDS:
                     relative = f"{branch}/stress/fold{fold}/seed{seed}.json"
                     (root / relative).parent.mkdir(parents=True, exist_ok=True)
                     (root / relative).write_text(json.dumps({
@@ -103,7 +103,7 @@ def _write_approval(root, *, research_ok=True, method=None, gates_ok=True, evide
         "research_ok": research_ok,
         "run_mode": "full",
         "fold_count": 3,
-        "seed_count": 5,
+        "seed_count": len(TRAIN_SEEDS),
         "schema_version": method["schema_version"],
         "method_id": __import__("scripts.walk_forward", fromlist=["frozen_method_id"])
         .frozen_method_id(method),
