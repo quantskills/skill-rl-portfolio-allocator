@@ -69,6 +69,11 @@ train-only factor selection, freezing 20 factors for validation and testing.
 
 Panda data SDK. No local files are read as authoritative input.
 
+| API | Purpose |
+|---|---|
+| `get_stock_daily_post` | A-share daily OHLCV + CSI300 constituent screening (`indicator="000300"`) |
+| `get_index_daily` | Index daily data (CSI300, symbol `000300.SH`) |
+
 | Variable | Required | Notes |
 |---|---:|---|
 | `PANDA_DATA_USERNAME` | yes | Panda data account name |
