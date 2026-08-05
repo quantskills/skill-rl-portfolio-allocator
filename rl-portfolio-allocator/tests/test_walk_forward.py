@@ -482,7 +482,7 @@ def test_direct_script_help_bootstraps_package_imports():
         assert "usage" in completed.stdout.lower()
 
 
-def test_cli_wires_fold_factor_inputs_into_walk_forward(monkeypatch):
+def test_cli_wires_fold_factor_inputs_into_walk_forward(monkeypatch, tmp_path):
     import scripts.walk_forward as walk_forward
 
     captured = {}
@@ -493,6 +493,14 @@ def test_cli_wires_fold_factor_inputs_into_walk_forward(monkeypatch):
 
     def fake_run_walk_forward(**kwargs):
         captured.update(kwargs)
+
+    # Patch file existence checks so the test is isolated from disk state.
+    _original_exists = pathlib.Path.exists
+    def _fake_exists(self: pathlib.Path) -> bool:
+        if self.name in ("features.parquet", "index_returns.parquet"):
+            return True
+        return _original_exists(self)
+    monkeypatch.setattr(pathlib.Path, "exists", _fake_exists)
 
     monkeypatch.setattr(walk_forward.pd, "read_parquet", fake_read_parquet)
     monkeypatch.setattr(walk_forward, "run_walk_forward", fake_run_walk_forward)

@@ -127,9 +127,15 @@ def load_prices(symbols: list[str], start: str, end: Optional[str]) -> pd.DataFr
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["symbol", "date"])
     # 重命名日期列和其他必要字段
     df = df.rename(columns={"date": "trade_date"})
-    # 确保有 amount 列（如果没有就用 close * volume 估算）
+    # 确保有 amount 列（成交额），优先使用 API 返回的真实 amount 字段
     if "amount" not in df.columns:
+        print("  WARNING: API 未返回 amount 字段，使用 close * volume 估算成交额")
         df["amount"] = df["close"] * df["volume"]
+    else:
+        amount_null_rate = df["amount"].isna().mean()
+        if amount_null_rate > 0:
+            print(f"  WARNING: amount 字段缺失率 {amount_null_rate:.1%}，缺失值用 close * volume 填充")
+            df["amount"] = df["amount"].fillna(df["close"] * df["volume"])
     if "is_suspended" not in df.columns:
         df["is_suspended"] = df["volume"].fillna(0) == 0
     return df

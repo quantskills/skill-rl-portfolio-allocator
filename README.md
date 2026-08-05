@@ -101,8 +101,8 @@ README.md                                           本文件
 
 | 接口 | 用途 |
 |------|------|
-| `get_a_share_daily` | A 股日线行情（OHLCV） |
-| `get_csi300_members` | CSI300 成分股及权重 |
+| `get_stock_daily_post` | A 股日线行情（OHLCV）及 CSI300 成分股筛选（`indicator="000300"`） |
+| `get_index_daily` | 指数日线行情（CSI300，代码 `000300.SH`） |
 
 | 环境变量 | 说明 |
 |----------|------|
