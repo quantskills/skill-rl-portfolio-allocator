@@ -1,3 +1,8 @@
+---
+name: rl-portfolio-allocator
+description: Research and evaluate a PPO-based CSI300 factor-weight allocator with walk-forward gates. Use for offline research and approved publication workflows only; do not place trades or present results as investment advice.
+---
+
 # QuantSkills Entry
 
 **Name**: skill-rl-portfolio-allocator
