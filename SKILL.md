@@ -31,3 +31,7 @@ description: Research and evaluate a PPO-based CSI300 factor-weight allocator wi
 ## Boundaries
 
 本仓库为研究与工程材料。**不构成投资建议、不承诺收益、不代表 QuantSkills / Panda data / Codex / Claude Code / Cursor / Hermes / OpenClaw 的官方背书。** 不得记录或提交 Panda data 凭据。
+
+## Pandadata compatibility
+
+[Pandadata 1.0.6 compatibility](references/pandadata-compatibility.md) — exact SDK baseline, validation scope, and shared guidance for all supported agent runtimes.
