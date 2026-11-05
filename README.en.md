@@ -164,3 +164,6 @@ trading recommendations, return predictions, or deterministic signals.
 ## License
 
 GPL-3.0-only. See `LICENSE`.
+
+
+Pandadata compatibility maintenance: [abgyjaguo](https://github.com/abgyjaguo). Existing authorship is retained.
